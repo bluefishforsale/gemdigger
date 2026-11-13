@@ -74,6 +74,11 @@ jobs:
         with:
           name: windows-unsigned
           path: dist
+      - name: artifact is exactly the one exe
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem -Path dist -Recurse -Force | ForEach-Object { $_.FullName.Substring((Resolve-Path dist).Path.Length + 1) })
+          if ($files.Count -ne 1 -or $files[0] -ne 'gemdigger.exe') { throw "unexpected files in artifact: $($files -join ', ')" }
       # NOTE: the CI identity's only role is Certificate Profile Signer on the
       # signing account, not the subscription, so login must not require one.
       - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
@@ -135,11 +140,9 @@ jobs:
     environment: release
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
-        with:
-          name: macos-unsigned
-          path: unsigned
-      - run: ditto -x -k unsigned/unsigned.zip dist
+      # NOTE: the keychain is set up from trusted repo scripts *before* the build
+      # artifact arrives, and the artifact is unpacked outside the workspace, so a
+      # poisoned build can't overwrite a script that later runs beside the key.
       - name: signing keychain and notarization key
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -148,13 +151,35 @@ jobs:
           APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: scripts/macos-signing-setup.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-unsigned
+          path: ${{ runner.temp }}/artifact
+      - name: unpack and check the unsigned app
+        run: |
+          zip="$RUNNER_TEMP/artifact/unsigned.zip"
+          out="$RUNNER_TEMP/unsigned"
+          # Refuse traversal before anything is written.
+          if zipinfo -1 "$zip" | grep -E '(^/|(^|/)\.\.(/|$))'; then
+            echo "::error::artifact has absolute or .. paths"; exit 1
+          fi
+          mkdir "$out"
+          ditto -x -k "$zip" "$out"
+          if [ -n "$(find "$out" -type l)" ]; then
+            echo "::error::artifact contains symlinks"; exit 1
+          fi
+          files=$(cd "$out" && find . -type f | sort)
+          expected=$(printf '%s\n' ./GemDigger.app/Contents/Info.plist ./GemDigger.app/Contents/MacOS/gemdigger)
+          if [ "$files" != "$expected" ]; then
+            echo "::error::unexpected files in artifact:"; echo "$files"; exit 1
+          fi
       - name: sign, notarize and staple
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
         run: |
-          app=dist/GemDigger.app
+          app="$RUNNER_TEMP/unsigned/GemDigger.app"
           # Notarization requires the hardened runtime and a secure timestamp.
           codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
           ditto -c -k --keepParent "$app" "$RUNNER_TEMP/notarize.zip"
@@ -165,14 +190,15 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app"
           xcrun stapler validate "$app"
           spctl --assess --type execute --verbose=2 "$app"
-          (cd dist && ditto -c -k --keepParent GemDigger.app gemdigger-macos.zip && rm -rf GemDigger.app)
+          mkdir -p "$RUNNER_TEMP/signed"
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/signed/gemdigger-macos.zip"
       - name: remove the signing keychain
         if: always()
         run: scripts/macos-signing-cleanup.sh
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: dist/gemdigger-macos.zip
+          path: ${{ runner.temp }}/signed/gemdigger-macos.zip
           if-no-files-found: error
 
   publish:
