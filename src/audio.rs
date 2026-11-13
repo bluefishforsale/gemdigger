@@ -12,6 +12,7 @@ use macroquad::audio::{
 
 use crate::game::{Event, Game};
 use crate::monsters::Size;
+use crate::settings::Settings;
 use crate::synth;
 use crate::world;
 
@@ -107,21 +108,40 @@ impl Audio {
     }
 
     /// Sets loop volumes from the pod's state; call every frame.
-    pub fn update(&self, game: &Game) {
+    pub fn update(&self, game: &Game, settings: &Settings) {
         let pos = world::band_position(game.depth());
+        let music = if settings.music { MUSIC_VOLUME } else { 0.0 };
         for (i, track) in self.music.iter().enumerate() {
             let w = (1.0 - (pos - i as f32).abs()).max(0.0);
-            set_sound_volume(track, w * MUSIC_VOLUME);
+            set_sound_volume(track, w * music);
         }
+        let sound = settings.sound;
         if let Some(s) = self.sfx.get("drill") {
-            set_sound_volume(s, if game.pod.dig.is_some() { 0.35 } else { 0.0 });
+            set_sound_volume(
+                s,
+                if sound && game.pod.dig.is_some() {
+                    0.35
+                } else {
+                    0.0
+                },
+            );
         }
         if let Some(s) = self.sfx.get("thrust") {
-            set_sound_volume(s, if game.pod.thrusting { 0.3 } else { 0.0 });
+            set_sound_volume(
+                s,
+                if sound && game.pod.thrusting {
+                    0.3
+                } else {
+                    0.0
+                },
+            );
         }
     }
 
-    pub fn react(&self, events: &[Event]) {
+    pub fn react(&self, events: &[Event], settings: &Settings) {
+        if !settings.sound {
+            return;
+        }
         for e in events {
             match e {
                 Event::Dug { .. } => self.play("dug", 0.5),

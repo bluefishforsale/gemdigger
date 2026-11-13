@@ -400,7 +400,7 @@ impl Renderer {
         vec2(wx * TILE - self.view.x, wy * TILE - self.view.y)
     }
 
-    pub fn draw(&mut self, game: &Game, art: &Art) {
+    pub fn draw(&mut self, game: &Game, art: &Art, shake: bool) {
         let (sw, sh) = (screen_width(), screen_height());
         let world_w = WIDTH as f32 * TILE;
         let mut cam = self.cam;
@@ -410,7 +410,11 @@ impl Renderer {
             cam.x.clamp(sw / 2.0 - TILE, world_w + TILE - sw / 2.0)
         };
         cam.y = cam.y.max(-8.0 * TILE + sh / 2.0);
-        let amp = game.shake.min(1.2).powi(2) * 14.0;
+        let amp = if shake {
+            game.shake.min(1.2).powi(2) * 14.0
+        } else {
+            0.0
+        };
         let shake = vec2(gen_range(-amp, amp), gen_range(-amp, amp));
         self.view = cam - vec2(sw / 2.0, sh / 2.0) + shake;
 

@@ -48,7 +48,7 @@ pub fn load(path: &Path) -> anyhow::Result<Loaded> {
     }
 }
 
-pub fn write(path: &Path, data: &SaveData) -> anyhow::Result<()> {
+pub fn write(path: &Path, data: &impl serde::Serialize) -> anyhow::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)
             .with_context(|| format!("unable to create \"{}\"", dir.display()))?;
