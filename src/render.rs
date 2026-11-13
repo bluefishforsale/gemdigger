@@ -547,7 +547,9 @@ impl Renderer {
             0.0
         };
         let shake = vec2(gen_range(-amp, amp), gen_range(-amp, amp));
-        self.view = cam - vec2(sw / 2.0, sh / 2.0) + shake;
+        // Whole pixels only: text snaps to the pixel grid while sprites don't, so a
+        // fractional camera makes labels jitter against the art they sit on.
+        self.view = (cam - vec2(sw / 2.0, sh / 2.0) + shake).round();
 
         clear_background(Color::new(0.02, 0.02, 0.04, 1.0));
         self.draw_sky(sw);
@@ -1271,7 +1273,19 @@ impl Renderer {
 
     fn draw_hud(&self, game: &Game, art: &Art, sw: f32, sh: f32) {
         let (x, y) = (14.0, 14.0);
-        draw_rectangle(x, y, 300.0, 242.0, PANEL);
+        let minerals: Vec<(Mineral, String)> = Mineral::ALL
+            .iter()
+            .map(|&m| (m, format!("{} {}", m.name(), game.count(Item::Mineral(m)))))
+            .collect();
+        let gap = 24.0;
+        let minerals_w: f32 = minerals
+            .iter()
+            .map(|(_, l)| 16.0 + measure_text(l, None, 20, 1.0).width + gap)
+            .sum::<f32>()
+            - gap;
+        // Grow to fit the widest row, so counts in the tens and hundreds never spill.
+        let width = 300.0f32.max(12.0 + minerals_w + 14.0);
+        draw_rectangle(x, y, width, 254.0, PANEL);
         let icon = |name: &str, row: f32| {
             if let Some(tex) = art.get(name) {
                 draw_texture_ex(
@@ -1366,11 +1380,10 @@ impl Renderer {
             Color::new(1.0, 0.7, 0.4, 1.0),
         );
         let mut mx = x + 12.0;
-        for m in Mineral::ALL {
-            let label = format!("{} {}", m.name(), game.count(Item::Mineral(m)));
-            draw_circle(mx + 6.0, row_y(6.0) - 7.0, 6.0, mineral_color(m));
-            text(&label, mx + 16.0, row_y(6.0), 20.0, WHITE);
-            mx += measure_text(&label, None, 20, 1.0).width + 30.0;
+        for (m, label) in &minerals {
+            draw_circle(mx + 6.0, row_y(6.0) - 7.0, 6.0, mineral_color(*m));
+            text(label, mx + 16.0, row_y(6.0), 20.0, WHITE);
+            mx += 16.0 + measure_text(label, None, 20, 1.0).width + gap;
         }
 
         if game.depth() < 1.0 && !game.at_shop() {
