@@ -9,9 +9,9 @@ use crate::world::{self, Tile, WIDTH, World};
 /// Half the pod's width and height, in tiles.
 pub const POD_HALF: f32 = 0.4;
 /// Where the pod appears after dying: standing on the surface by the shop.
-pub const SPAWN: (f32, f32) = (15.0, -POD_HALF);
+pub const SPAWN: (f32, f32) = (48.0, -POD_HALF);
 /// The columns the shop covers on the surface.
-pub const SHOP_COLUMNS: (f32, f32) = (12.0, 18.0);
+pub const SHOP_COLUMNS: (f32, f32) = (45.0, 51.0);
 pub const MAX_LEVEL: u8 = 5;
 pub const ORE_NAMES: [&str; 6] = ["Copper", "Silver", "Gold", "Emerald", "Ruby", "Starcrystal"];
 const ORE_VALUES: [u64; 6] = [10, 25, 60, 150, 400, 1000];
@@ -785,7 +785,26 @@ impl Game {
         game.stashes = s.stashes;
         game.deaths = s.deaths;
         game.max_depth = s.max_depth;
+        game.free_pod();
         game
+    }
+
+    /// Clears rock (never walls) from under the pod, for saves made against a
+    /// differently generated world.
+    fn free_pod(&mut self) {
+        let (x, y) = (self.pod.x, self.pod.y);
+        let x0 = (x - POD_HALF + EPS).floor() as i32;
+        let x1 = (x + POD_HALF - EPS).floor() as i32;
+        let y0 = (y - POD_HALF + EPS).floor() as i32;
+        let y1 = (y + POD_HALF - EPS).floor() as i32;
+        for ty in y0..=y1 {
+            for tx in x0..=x1 {
+                let tile = self.world.get(tx, ty);
+                if tile.is_solid() && tile != Tile::Wall {
+                    self.world.set(tx, ty, Tile::Air);
+                }
+            }
+        }
     }
 }
 
@@ -1081,6 +1100,22 @@ mod tests {
         let back = Game::from_save(serde_json::from_str(&json).unwrap());
         assert_eq!(back.to_save(), data);
         assert_eq!(back.world.get(5, 90), Tile::Air);
+    }
+
+    /// A save from an older or narrower world can land the pod in rock that
+    /// generation now places there; loading must free it instead of trapping it.
+    #[test]
+    fn loading_frees_a_pod_buried_in_rock() {
+        let mut data = Game::new(4).to_save();
+        let (x, y) = (20.5, 300.5);
+        data.x = x;
+        data.y = y;
+        let g = Game::from_save(data.clone());
+        assert!(!g.collides(x, y), "pod still buried after load");
+        assert!(
+            g.world.get(x.floor() as i32, y.floor() as i32) == Tile::Air,
+            "pod's own tile not cleared"
+        );
     }
 
     /// Saving mid-dig must not put the pod inside rock on reload.

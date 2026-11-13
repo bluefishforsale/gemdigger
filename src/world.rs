@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 /// Columns in the mine; everything outside is bedrock wall.
-pub const WIDTH: i32 = 48;
+pub const WIDTH: i32 = 96;
 /// Depth (in tiles) where each band starts: topsoil, clay, stone, deep, abyss.
 pub const BAND_STARTS: [i32; 5] = [0, 50, 150, 300, 500];
 /// Depth where each ore tier first shows up.
