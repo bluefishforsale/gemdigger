@@ -28,7 +28,9 @@ fn main() {
         .skip(1)
         .any(|a| a == "--version" || a == "-V")
     {
-        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        // A GUI-subsystem exe may have no stdout at all; never panic over it.
+        let line = format!("{} {}\n", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        let _ = std::io::Write::write_all(&mut std::io::stdout(), line.as_bytes());
         return;
     }
     let conf = Conf {
