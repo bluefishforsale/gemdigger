@@ -187,6 +187,74 @@ fn item_color(item: Item) -> Color {
     }
 }
 
+/// One tree of four kinds; `shade` picks its green (rarely an autumn gold).
+fn draw_tree(x: f32, base: f32, s: f32, kind: u64, shade: f32) {
+    let leaf = match shade {
+        k if k < 0.35 => Color::new(0.2, 0.44, 0.24, 1.0),
+        k if k < 0.65 => Color::new(0.3, 0.5, 0.22, 1.0),
+        k if k < 0.9 => Color::new(0.18, 0.42, 0.34, 1.0),
+        _ => Color::new(0.62, 0.5, 0.2, 1.0),
+    };
+    let light = mix(leaf, Color::new(0.95, 0.95, 0.7, 1.0), 0.22);
+    let dark = mix(leaf, BLACK, 0.25);
+    let bark = Color::new(0.36, 0.25, 0.17, 1.0);
+    match kind {
+        // Round broadleaf: a trunk under a cloud of three leafy puffs.
+        0 => {
+            let (tw, th) = (4.0 * s, 13.0 * s);
+            draw_rectangle(x - tw / 2.0, base - th, tw, th, bark);
+            let cy = base - th - 7.0 * s;
+            draw_circle(x - 7.0 * s, cy + 3.0 * s, 8.0 * s, dark);
+            draw_circle(x + 7.0 * s, cy + 3.0 * s, 8.0 * s, dark);
+            draw_circle(x, cy - 2.0 * s, 10.5 * s, leaf);
+            draw_circle(x - 3.5 * s, cy - 5.5 * s, 4.5 * s, light);
+        }
+        // Conifer: short trunk, three stacked tiers.
+        1 => {
+            let (tw, th) = (3.0 * s, 6.0 * s);
+            draw_rectangle(x - tw / 2.0, base - th, tw, th, bark);
+            for (k, w) in [(0.0, 11.0), (1.0, 8.5), (2.0, 6.0)] {
+                let bottom = base - th - k * 8.0 * s;
+                let top = bottom - 13.0 * s;
+                let fill = if k == 2.0 { leaf } else { dark };
+                draw_triangle(
+                    vec2(x - w * s, bottom),
+                    vec2(x + w * s, bottom),
+                    vec2(x, top),
+                    fill,
+                );
+                draw_triangle(
+                    vec2(x - w * s * 0.2, bottom - 2.0 * s),
+                    vec2(x, top),
+                    vec2(x - w * s * 0.75, bottom - s),
+                    light,
+                );
+            }
+        }
+        // Poplar: tall and narrow.
+        2 => {
+            let (tw, th) = (3.0 * s, 8.0 * s);
+            draw_rectangle(x - tw / 2.0, base - th, tw, th, bark);
+            draw_ellipse(x, base - th - 14.0 * s, 6.5 * s, 16.0 * s, 0.0, leaf);
+            draw_ellipse(
+                x - 2.0 * s,
+                base - th - 18.0 * s,
+                2.5 * s,
+                8.0 * s,
+                0.0,
+                light,
+            );
+        }
+        // Bush: low and wide, no trunk showing.
+        _ => {
+            draw_circle(x - 6.0 * s, base - 4.0 * s, 6.0 * s, dark);
+            draw_circle(x + 6.0 * s, base - 4.0 * s, 6.5 * s, dark);
+            draw_circle(x, base - 7.0 * s, 7.5 * s, leaf);
+            draw_circle(x - 2.5 * s, base - 9.5 * s, 3.0 * s, light);
+        }
+    }
+}
+
 /// How dark the deep is (0 = daylight) at a depth in tiles.
 fn darkness(depth: f32) -> f32 {
     ((depth - 10.0) / 350.0).clamp(0.0, 1.0).powf(0.8) * 0.96
@@ -681,26 +749,19 @@ impl Renderer {
         if !trees {
             return;
         }
-        // Round tree tops dotted along the nearest ridge.
-        let dark = mix(color, Color::new(0.1, 0.25, 0.15, 1.0), 0.55);
-        let spacing = 38.0;
-        let first = (offset / spacing).floor() as i32;
-        for i in first..first + (sw / spacing) as i32 + 2 {
-            let u = i as f32 * spacing;
-            let n = world::unit(world::hash(seed, i, 0, 21));
-            if n < 0.45 {
+        // A loose woodland along the nearest ridge: leafy rounds, conifers,
+        // poplars and bushes, each standing on the hill where it's drawn.
+        let spacing = 30.0;
+        let first = (offset / spacing).floor() as i32 - 1;
+        for i in first..first + (sw / spacing) as i32 + 3 {
+            let h = world::hash(seed, i, 0, 21);
+            if world::unit(h) < 0.35 {
                 continue;
             }
-            let x = u - offset + n * 12.0;
-            let base = ground - ridge(u) + 8.0;
-            let r = 9.0 + 9.0 * n;
-            draw_circle(x, base - r * 0.6, r, dark);
-            draw_circle(
-                x - r * 0.3,
-                base - r * 0.9,
-                r * 0.55,
-                mix(dark, WHITE, 0.15),
-            );
+            let u = i as f32 * spacing + world::unit(h >> 8) * 18.0;
+            let base = ground - ridge(u) + 3.0;
+            let s = 0.7 + 0.7 * world::unit(h >> 16);
+            draw_tree(u - offset, base, s, (h >> 24) % 4, world::unit(h >> 32));
         }
     }
 
