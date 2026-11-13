@@ -6,8 +6,8 @@
 
 param(
     [string]$Version = "",
-    [string]$Repo = "bluefishforsale/windows-exe-template",
-    [string]$Name = "windows-exe-template"
+    [string]$Repo = "bluefishforsale/gemdigger",
+    [string]$Name = "gemdigger"
 )
 
 $ErrorActionPreference = "Stop"

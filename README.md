@@ -1,41 +1,14 @@
-# windows-exe-template
+# GemDigger
 
-A starting point for Rust programs that ship as a Windows `.exe`. The program itself is a placeholder that prints a greeting and its version. The point of the repo is everything around it: a pinned toolchain, a build that runs on Windows in CI, tagged releases that publish the `.exe` with a checksum, and an installer that verifies that checksum before anything touches your `PATH`.
+A cozy-to-creepy digging game. You drive a little drill pod down into the ground, dig out gems, fly back up to sell them at the shop, and spend the money on a better drill, a bigger tank, a roomier cargo hold, a tougher hull and a brighter lamp. The mine goes down forever. Near the surface it's sunny and cheerful, but the deeper you go the darker it gets, the music turns ominous, and things start living in the rock.
 
-The habits come from [claude-signal](https://github.com/bluefishforsale/claude-signal), where every version is pinned, every download is checked, and there's an uninstall script that backs all of it out. Pins and checksums cost very little up front, and they're how you avoid running something you didn't choose.
+It's meant to be gentle. Lives are infinite: when the pod is lost (out of fuel, a bad fall, or something with teeth) it comes back at the shop with your money and upgrades intact. Only the gems you were carrying are lost, and they aren't really lost either, since they stay where you fell as a glowing crate, and an arrow at the edge of the screen points the way back to every one of them. Progress saves itself every 30 seconds, whenever you sell, buy or die, and when you close the window.
 
-## Starting a new project from it
+## Playing
 
-Click "Use this template" on GitHub (or `gh repo create NAME --private --template bluefishforsale/windows-exe-template`), then rename `windows-exe-template` in three places: `name` in `Cargo.toml`, the `$Repo` and `$Name` defaults at the top of `install-windows.ps1`, and `$Name` in `uninstall-windows.ps1`. The workflows read the name from `cargo metadata`, so they need no edits. Run `cargo build` once so `Cargo.lock` picks up the new name, then replace `run` in `src/main.rs` with the real program.
+Arrow keys or WASD drive left and right and dig in the direction you push; up (or space) fires the thruster. You can dig sideways and down, but not up, so plan a way back. At the shop, click a row or press 1 to 8 to sell, refuel, repair, or upgrade.
 
-After cloning, turn on the pre-commit hook once, which runs rustfmt on staged files so formatting never shows up in review:
-
-```bash
-git config core.hooksPath .githooks
-```
-
-## Building
-
-You can write and test on macOS or Linux, since `cargo test` and `cargo clippy` run anywhere. The real `.exe` is built on Windows, though: CI uses a `windows-latest` runner with the MSVC toolchain rather than cross-compiling, because that's the build users actually run, and clippy and the tests should see the same `cfg` it does.
-
-`rust-toolchain.toml` pins the compiler (currently 1.96.0), and `Cargo.lock` is committed, so CI, releases, and every clone build with the same inputs. Bump the toolchain in its own commit and read the release notes first.
-
-`.cargo/config.toml` links the C runtime statically. Without that, the `.exe` depends on `vcruntime140.dll` and won't start on a machine that's missing the Visual C++ redistributable, which is a confusing first impression for whoever you hand it to.
-
-## CI
-
-`ci.yml` runs on every push to `main` and every PR. On Windows it runs `cargo fmt -- --check`, `cargo clippy -- -D warnings` (warnings fail the build), `cargo test`, a release build, and then runs the built `.exe` with `--version` to check it starts and reports the version in `Cargo.toml`. A second Windows job parses every `.ps1` and runs `Invoke-ScriptAnalyzer` on them, and a small Linux job runs shellcheck on the git hook.
-
-## Releasing
-
-Bump `version` in `Cargo.toml`, commit, then tag and push:
-
-```bash
-git tag v0.2.0
-git push origin v0.2.0
-```
-
-`release.yml` refuses a tag that doesn't match `Cargo.toml`, since otherwise the `.exe` would report a different version than the release it came from. Then it runs the tests, builds, and publishes a GitHub Release with the `.exe` and a `SHA256SUMS` file.
+Monsters show up below about 60 m, and you always get a warning: the ground rumbles and the screen shakes for a couple of seconds before one breaks out of the rock. They only ever move side to side, so the escape is always the same, fly straight up. Small ones nibble the hull, bigger ones bite harder, and the biggest one, the Deep Thing, which only lives far down, takes the pod in one go.
 
 ## Installing on Windows
 
@@ -43,20 +16,18 @@ git push origin v0.2.0
 powershell -ExecutionPolicy Bypass -File install-windows.ps1
 ```
 
-This downloads the latest release (or the one given with `-Version v0.1.0`), checks the `.exe` against `SHA256SUMS`, copies it to `%LOCALAPPDATA%\Programs\windows-exe-template`, and adds that folder to your user `PATH`. It's safe to rerun, and rerunning upgrades in place. No admin rights are needed.
+That downloads the latest release through the [GitHub CLI](https://cli.github.com/) (the repo is private, so `winget install GitHub.cli` and `gh auth login` first), checks it against the release's `SHA256SUMS`, and installs it to `%LOCALAPPDATA%\Programs\gemdigger`, on your `PATH`. The save lives at `%APPDATA%\GemDigger\save.json`, and `uninstall-windows.ps1` removes the game but leaves the save alone.
 
-The repo is private, so the installer downloads through the [GitHub CLI](https://cli.github.com/) rather than a plain URL, which would 404 without credentials. Install it with `winget install GitHub.cli` and run `gh auth login` first.
+## How it's built
 
-It edits `PATH` through the registry directly instead of `[Environment]::SetEnvironmentVariable`, because that call expands every `%VAR%` already in your `PATH` and saves the result as a plain string, quietly freezing entries like `%USERPROFILE%\bin`.
+Rust with [macroquad](https://macroquad.rs), forked from `windows-exe-template`, so it inherits the pinned toolchain, Windows CI with a `--version` smoke test, tag-driven releases and the checksummed installer; the template's README has the details on each.
 
-## Uninstall
+The map is never stored: every tile comes from a hash of the world seed and its position, and the save only records the tiles you've changed, which is what lets it go down forever without the save growing past what you've actually dug. All of the music and sound effects are synthesized from code at startup, five music loops (one per depth band, crossfaded as you descend) plus every effect, so there's no audio to license or ship.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File uninstall-windows.ps1
-```
+The art comes from an image-model sprite atlas in `art/atlas.png`, sliced into named sprites under `assets/sprites/` by `tools/slice_atlas.py` and baked into the exe at build time. To swap art without rebuilding, drop a PNG with the same name into an `assets/sprites` folder next to the exe; sounds work the same way from `assets/sounds` (`.ogg` or `.wav`, named like `pickup_3` or `music_4`). If the atlas is regenerated, its sprite boxes need re-measuring, and the script's docstring says how.
 
-This removes the install folder and its `PATH` entry, and leaves the rest of your `PATH` alone.
+For testing without touching a real save, point `GEMDIGGER_SAVE` at another file.
 
-## Caveat
+## Checks
 
-The install and uninstall scripts pass the PowerShell parser and ScriptAnalyzer in CI, and the build and `--version` smoke test run on a real Windows runner, but the scripts haven't been run end to end on a desktop Windows machine yet.
+`cargo fmt -- --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`. The tests cover the rules headless: digging, death dropping cargo as a stash while keeping money, stash recovery against a full hold, monsters never moving vertically, the Deep Thing killing a maxed hull, flying up escaping it, save round trips, and the corrupt-save backup.

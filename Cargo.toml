@@ -1,5 +1,5 @@
 [package]
-name = "windows-exe-template"
+name = "gemdigger"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.96"
@@ -7,3 +7,15 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+dirs = "7"
+macroquad = { version = "0.4", features = ["audio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Synthesizing the music at startup is slow without optimization; this keeps
+# `cargo run` startup bearable while our own crate stays quick to rebuild.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev]
+opt-level = 1
