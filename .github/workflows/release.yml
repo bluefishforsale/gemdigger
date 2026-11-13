@@ -70,15 +70,23 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v5
+      # NOTE: the artifact lands outside the workspace and only the one expected
+      # exe is copied out to sign, so a poisoned build can't replace the repo
+      # script that runs after Azure login.
       - uses: actions/download-artifact@v4
         with:
           name: windows-unsigned
-          path: dist
+          path: ${{ runner.temp }}/artifact
       - name: artifact is exactly the one exe
         shell: pwsh
         run: |
-          $files = @(Get-ChildItem -Path dist -Recurse -Force | ForEach-Object { $_.FullName.Substring((Resolve-Path dist).Path.Length + 1) })
-          if ($files.Count -ne 1 -or $files[0] -ne 'gemdigger.exe') { throw "unexpected files in artifact: $($files -join ', ')" }
+          $root = Join-Path $env:RUNNER_TEMP 'artifact'
+          $items = @(Get-ChildItem -Path $root -Recurse -Force)
+          if ($items.Count -ne 1 -or $items[0].Name -ne 'gemdigger.exe' -or $items[0].PSIsContainer -or $items[0].LinkType) {
+            throw "unexpected artifact contents: $($items.FullName -join ', ')"
+          }
+          $sign = New-Item -ItemType Directory (Join-Path $env:RUNNER_TEMP 'sign')
+          Copy-Item $items[0].FullName $sign
       # NOTE: the CI identity's only role is Certificate Profile Signer on the
       # signing account, not the subscription, so login must not require one.
       - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
@@ -91,15 +99,15 @@ jobs:
           endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
           signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ vars.AZURE_CERT_PROFILE }}
-          files-folder: ${{ github.workspace }}\dist
+          files-folder: ${{ runner.temp }}\sign
           files-folder-filter: exe
           exclude-environment-credential: true
-      - run: ./scripts/verify-authenticode.ps1 -Folder dist
+      - run: ./scripts/verify-authenticode.ps1 -Folder "$env:RUNNER_TEMP\sign"
         shell: pwsh
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: dist/*
+          path: ${{ runner.temp }}/sign/gemdigger.exe
           if-no-files-found: error
 
   # Built and checked without secrets; only the signing job below sees them,
