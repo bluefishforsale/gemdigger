@@ -37,7 +37,7 @@ fi
   echo
   printf -- "- \`%s\`\n" "${missing[@]}"
   echo
-  echo "Add them to the \`release\` environment as described under "Signing" in README.md. Nothing was built or published."
+  echo "Add them to the \`release\` environment as described in the Signing section of AGENTS.md. Nothing was built or published."
 } >>"${GITHUB_STEP_SUMMARY:-/dev/stderr}"
 echo "::error title=Release refused::${#missing[@]} signing input(s) missing: ${missing[*]}"
 exit 1

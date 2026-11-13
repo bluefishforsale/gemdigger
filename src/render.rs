@@ -294,6 +294,16 @@ impl Renderer {
         }
     }
 
+    /// Jumps the camera onto the pod instead of easing over from the spawn.
+    pub fn snap_to(&mut self, game: &Game) {
+        self.cam = vec2(game.pod.x, game.pod.y) * TILE;
+    }
+
+    /// Sends a flock across right away rather than after the usual wait.
+    pub fn prime_birds(&mut self) {
+        self.next_flock = 0.0;
+    }
+
     pub fn toast(&mut self, text: impl Into<String>) {
         self.toasts.push(Toast {
             text: text.into(),
@@ -917,7 +927,7 @@ impl Renderer {
         );
         text_centered(
             "SHOP",
-            left.x + w * 0.396,
+            left.x + w * 0.349,
             top + h * 0.43,
             30.0,
             Color::new(0.35, 0.2, 0.1, 1.0),

@@ -1,6 +1,6 @@
-# Windows entry point. Fetches a release .exe through gh, because an anonymous
-# download URL 404s on a private repo, checks it against the release's
-# SHA256SUMS, and puts it on the user PATH. Safe to rerun; it upgrades in place.
+# Windows entry point. Downloads a release .exe, checks it against the
+# release's SHA256SUMS, and puts it on the user PATH. Safe to rerun; it
+# upgrades in place.
 #
 #   powershell -ExecutionPolicy Bypass -File install-windows.ps1 [-Version v0.1.0]
 
@@ -14,18 +14,14 @@ $ErrorActionPreference = "Stop"
 $installDir = Join-Path $env:LOCALAPPDATA "Programs\$Name"
 $exe = "$Name.exe"
 
-if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
-    throw "gh isn't installed. Run 'winget install GitHub.cli' and 'gh auth login', then rerun this."
-}
+$base = if ($Version) { "https://github.com/$Repo/releases/download/$Version" } else { "https://github.com/$Repo/releases/latest/download" }
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetRandomFileName())
 New-Item -ItemType Directory $tmp | Out-Null
 try {
-    $ghArgs = @("release", "download")
-    if ($Version) { $ghArgs += $Version }
-    $ghArgs += @("--repo", $Repo, "--dir", $tmp, "--pattern", $exe, "--pattern", "SHA256SUMS")
-    & gh @ghArgs
-    if ($LASTEXITCODE -ne 0) { throw "gh release download failed for $Repo $Version" }
+    foreach ($file in @($exe, "SHA256SUMS")) {
+        Invoke-WebRequest -UseBasicParsing -Uri "$base/$file" -OutFile (Join-Path $tmp $file)
+    }
 
     $line = Get-Content (Join-Path $tmp "SHA256SUMS") | Where-Object { $_ -match "^[0-9a-f]{64}  $([regex]::Escape($exe))$" }
     if (-not $line) { throw "SHA256SUMS has no entry for $exe" }
