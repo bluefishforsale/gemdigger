@@ -36,7 +36,7 @@ The identities belong to Terrac Skiens and are shared with signal-agent; its `do
 - secrets: the seven `APPLE_*` values, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and a random `KEYCHAIN_PASSWORD`
 - variables: `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, `AZURE_CERT_PROFILE`
 
-The `signal-agent-ci` app registration trusts this repo through a federated credential with subject `repo:bluefishforsale/gemdigger:environment:release`.
+The `signal-agent-ci` app registration trusts this repo through a federated credential. NOTE: GitHub's token names the repo by numeric IDs, so the subject is `repo:bluefishforsale@3721396/gemdigger@1456130580:environment:release` (credential `gemdigger-release-ids`). A plain `repo:bluefishforsale/gemdigger:...` subject fails Azure login with AADSTS700213.
 
 Builds run in jobs that have no secrets. The signing jobs only unpack the build artifacts outside the workspace, check that they hold exactly the expected files, then sign them. Keep it that way: no build step and no built binary may run in a job that can see the keys.
 
