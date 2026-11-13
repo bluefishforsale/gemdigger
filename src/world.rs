@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 /// Columns in the mine; everything outside is bedrock wall.
-pub const WIDTH: i32 = 48;
+pub const WIDTH: i32 = 96;
 /// Depth (in tiles) where each band starts: topsoil, clay, stone, deep, abyss.
 pub const BAND_STARTS: [i32; 5] = [0, 50, 150, 300, 500];
 /// Depth where each ore tier first shows up.
@@ -19,7 +19,37 @@ pub enum Tile {
     Dirt,
     Boulder,
     Ore(u8),
+    Mineral(Mineral),
     Wall,
+}
+
+/// Bomb ingredients. Worth little on their own; the shop crafts them into bombs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Mineral {
+    Coal,
+    Sulfur,
+    Potassium,
+}
+
+impl Mineral {
+    pub const ALL: [Mineral; 3] = [Mineral::Coal, Mineral::Sulfur, Mineral::Potassium];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Mineral::Coal => "Coal",
+            Mineral::Sulfur => "Sulfur",
+            Mineral::Potassium => "Potassium",
+        }
+    }
+
+    /// Shallowest row it appears in; deeper means rarer and harder to reach.
+    pub fn depth(self) -> i32 {
+        match self {
+            Mineral::Coal => 10,
+            Mineral::Sulfur => 90,
+            Mineral::Potassium => 180,
+        }
+    }
 }
 
 impl Tile {
@@ -30,7 +60,7 @@ impl Tile {
 
     /// Whether the drill can break this tile.
     pub fn is_diggable(self) -> bool {
-        matches!(self, Tile::Dirt | Tile::Ore(_))
+        matches!(self, Tile::Dirt | Tile::Ore(_) | Tile::Mineral(_))
     }
 }
 
@@ -116,8 +146,21 @@ fn generate(seed: u64, x: i32, y: i32) -> Tile {
     } else if r < cave + boulder + ore {
         Tile::Ore(ore_tier(seed, x, y))
     } else {
-        Tile::Dirt
+        mineral(seed, x, y).map_or(Tile::Dirt, Tile::Mineral)
     }
+}
+
+// Minerals only replace what would have been plain dirt, using their own hash,
+// so adding them didn't move any existing ore, boulder or cave.
+fn mineral(seed: u64, x: i32, y: i32) -> Option<Mineral> {
+    let m = unit(hash(seed, x, y, 4));
+    let kind = match m {
+        m if m < 0.008 => Mineral::Potassium,
+        m if m < 0.022 => Mineral::Sulfur,
+        m if m < 0.06 => Mineral::Coal,
+        _ => return None,
+    };
+    (y >= kind.depth()).then_some(kind)
 }
 
 /// The mine: a seed plus every tile the player has changed.
@@ -243,6 +286,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Bomb ingredients stay below their depth, so bombs stay hard to get.
+    #[test]
+    fn minerals_respect_their_depth() {
+        let w = World::new(21);
+        let mut seen = [false; 3];
+        for y in 0..400 {
+            for x in 0..WIDTH {
+                if let Tile::Mineral(m) = w.get(x, y) {
+                    assert!(y >= m.depth(), "{m:?} at {y} m, above {} m", m.depth());
+                    seen[m as usize] = true;
+                }
+            }
+        }
+        assert_eq!(seen, [true; 3], "some mineral never generated");
     }
 
     #[test]

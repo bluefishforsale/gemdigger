@@ -8,9 +8,10 @@ use macroquad::rand::gen_range;
 
 use crate::art::Art;
 use crate::game::{
-    Event, Game, MAX_LEVEL, ORE_NAMES, POD_HALF, SHOP_COLUMNS, ShopAction, Upgrade, ore_value,
+    BOMB_POUCH, Event, FUSE, Game, Item, MAX_LEVEL, POD_HALF, SHOP_COLUMNS, ShopAction, Upgrade,
 };
 use crate::monsters::{Monster, Phase, Size};
+use crate::world::Mineral;
 use crate::world::{self, Tile, WIDTH};
 
 /// Pixels per tile.
@@ -71,6 +72,17 @@ pub struct Renderer {
     glow: Texture2D,
     t: f32,
     flash: f32,
+    birds: Vec<Bird>,
+    next_flock: f32,
+}
+
+/// A small bird crossing the sky, in screen space above the horizon.
+struct Bird {
+    x: f32,
+    height: f32,
+    vx: f32,
+    phase: f32,
+    size: f32,
 }
 
 fn radial(size: u16, alpha: impl Fn(f32) -> f32) -> Texture2D {
@@ -125,8 +137,121 @@ fn text_centered(s: &str, cx: f32, y: f32, size: f32, color: Color) {
 fn tile_color(tile: Tile, y: i32) -> Color {
     match tile {
         Tile::Ore(t) => ORE_COLORS[(t as usize).min(5)],
+        Tile::Mineral(m) => mineral_color(m),
         Tile::Boulder => Color::new(0.6, 0.6, 0.6, 1.0),
         _ => BAND_COLORS[world::band(y)],
+    }
+}
+
+fn mineral_color(m: Mineral) -> Color {
+    match m {
+        Mineral::Coal => Color::new(0.16, 0.15, 0.18, 1.0),
+        Mineral::Sulfur => Color::new(0.97, 0.86, 0.2, 1.0),
+        Mineral::Potassium => Color::new(0.93, 0.86, 0.96, 1.0),
+    }
+}
+
+/// Chunks of a mineral set into a dirt tile: coal lumps, sulfur crystals,
+/// pale potassium spars.
+fn draw_mineral(p: Vec2, m: Mineral, h: u64) {
+    let color = mineral_color(m);
+    let rim = mix(color, WHITE, 0.45);
+    let (sides, base) = match m {
+        Mineral::Coal => (5u8, 8.0),
+        Mineral::Sulfur => (6, 6.5),
+        Mineral::Potassium => (4, 7.0),
+    };
+    for i in 0..4u64 {
+        let bits = h >> (i * 12);
+        let ox = 10.0 + (bits & 0x1f) as f32 / 31.0 * (TILE - 20.0);
+        let oy = 10.0 + ((bits >> 5) & 0x1f) as f32 / 31.0 * (TILE - 20.0);
+        let r = base * (0.7 + ((bits >> 10) & 0x3) as f32 * 0.15);
+        let rot = (bits & 0xff) as f32;
+        draw_poly(
+            p.x + ox,
+            p.y + oy,
+            sides,
+            r + 1.5,
+            rot,
+            Color::new(0.0, 0.0, 0.0, 0.45),
+        );
+        draw_poly(p.x + ox, p.y + oy, sides, r, rot, color);
+        draw_circle(p.x + ox - r * 0.3, p.y + oy - r * 0.3, r * 0.25, rim);
+    }
+}
+
+fn item_color(item: Item) -> Color {
+    match item {
+        Item::Gem(t) => ORE_COLORS[(t as usize).min(5)],
+        Item::Mineral(m) => mineral_color(m),
+    }
+}
+
+/// One tree of four kinds; `shade` picks its green (rarely an autumn gold).
+fn draw_tree(x: f32, base: f32, s: f32, kind: u64, shade: f32) {
+    let leaf = match shade {
+        k if k < 0.35 => Color::new(0.2, 0.44, 0.24, 1.0),
+        k if k < 0.65 => Color::new(0.3, 0.5, 0.22, 1.0),
+        k if k < 0.9 => Color::new(0.18, 0.42, 0.34, 1.0),
+        _ => Color::new(0.62, 0.5, 0.2, 1.0),
+    };
+    let light = mix(leaf, Color::new(0.95, 0.95, 0.7, 1.0), 0.22);
+    let dark = mix(leaf, BLACK, 0.25);
+    let bark = Color::new(0.36, 0.25, 0.17, 1.0);
+    match kind {
+        // Round broadleaf: a trunk under a cloud of three leafy puffs.
+        0 => {
+            let (tw, th) = (4.0 * s, 13.0 * s);
+            draw_rectangle(x - tw / 2.0, base - th, tw, th, bark);
+            let cy = base - th - 7.0 * s;
+            draw_circle(x - 7.0 * s, cy + 3.0 * s, 8.0 * s, dark);
+            draw_circle(x + 7.0 * s, cy + 3.0 * s, 8.0 * s, dark);
+            draw_circle(x, cy - 2.0 * s, 10.5 * s, leaf);
+            draw_circle(x - 3.5 * s, cy - 5.5 * s, 4.5 * s, light);
+        }
+        // Conifer: short trunk, three stacked tiers.
+        1 => {
+            let (tw, th) = (3.0 * s, 6.0 * s);
+            draw_rectangle(x - tw / 2.0, base - th, tw, th, bark);
+            for (k, w) in [(0.0, 11.0), (1.0, 8.5), (2.0, 6.0)] {
+                let bottom = base - th - k * 8.0 * s;
+                let top = bottom - 13.0 * s;
+                let fill = if k == 2.0 { leaf } else { dark };
+                draw_triangle(
+                    vec2(x - w * s, bottom),
+                    vec2(x + w * s, bottom),
+                    vec2(x, top),
+                    fill,
+                );
+                draw_triangle(
+                    vec2(x - w * s * 0.2, bottom - 2.0 * s),
+                    vec2(x, top),
+                    vec2(x - w * s * 0.75, bottom - s),
+                    light,
+                );
+            }
+        }
+        // Poplar: tall and narrow.
+        2 => {
+            let (tw, th) = (3.0 * s, 8.0 * s);
+            draw_rectangle(x - tw / 2.0, base - th, tw, th, bark);
+            draw_ellipse(x, base - th - 14.0 * s, 6.5 * s, 16.0 * s, 0.0, leaf);
+            draw_ellipse(
+                x - 2.0 * s,
+                base - th - 18.0 * s,
+                2.5 * s,
+                8.0 * s,
+                0.0,
+                light,
+            );
+        }
+        // Bush: low and wide, no trunk showing.
+        _ => {
+            draw_circle(x - 6.0 * s, base - 4.0 * s, 6.0 * s, dark);
+            draw_circle(x + 6.0 * s, base - 4.0 * s, 6.5 * s, dark);
+            draw_circle(x, base - 7.0 * s, 7.5 * s, leaf);
+            draw_circle(x - 2.5 * s, base - 9.5 * s, 3.0 * s, light);
+        }
     }
 }
 
@@ -164,6 +289,8 @@ impl Renderer {
             glow: radial(64, |r| (1.0 - r).powi(2)),
             t: 0.0,
             flash: 0.0,
+            birds: Vec::new(),
+            next_flock: 4.0,
         }
     }
 
@@ -281,6 +408,34 @@ impl Renderer {
             toast.age += dt;
         }
         self.toasts.retain(|t| t.age < 3.5);
+
+        // Every so often a small flock crosses the sky, in a loose V.
+        let sw = screen_width();
+        self.next_flock -= dt;
+        if self.next_flock <= 0.0 {
+            self.next_flock = gen_range(10.0, 24.0);
+            let from_left = gen_range(0.0, 1.0) < 0.5;
+            let vx: f32 = gen_range(45.0, 75.0) * if from_left { 1.0 } else { -1.0 };
+            let (x0, h0) = (
+                if from_left { -40.0 } else { sw + 40.0 },
+                gen_range(180.0, 330.0),
+            );
+            for i in 0..gen_range(3, 7) {
+                let rank = ((i + 1) / 2) as f32;
+                let side = if i % 2 == 0 { 1.0 } else { -1.0 };
+                self.birds.push(Bird {
+                    x: x0 - vx.signum() * rank * 22.0,
+                    height: h0 + side * rank * 12.0,
+                    vx: vx * gen_range(0.95, 1.05),
+                    phase: gen_range(0.0, TAU),
+                    size: gen_range(0.8, 1.2),
+                });
+            }
+        }
+        for b in &mut self.birds {
+            b.x += b.vx * dt;
+        }
+        self.birds.retain(|b| b.x > -120.0 && b.x < sw + 120.0);
     }
 
     fn react(&mut self, e: &Event, game: &Game) {
@@ -300,14 +455,19 @@ impl Renderer {
                     false,
                 );
             }
-            Event::Pickup { tier, x, y } => {
-                let t = (*tier as usize).min(5);
-                self.burst(*x, *y, 18 + 4 * t, ORE_COLORS[t], 5.0, 0.0, true);
-                self.toast(format!(
-                    "+1 {}  ({})",
-                    ORE_NAMES[t],
-                    money(ore_value(*tier))
-                ));
+            Event::Pickup { item, x, y } => {
+                let extra = if let Item::Gem(t) = item {
+                    4 * (*t as usize).min(5)
+                } else {
+                    0
+                };
+                self.burst(*x, *y, 18 + extra, item_color(*item), 5.0, 0.0, true);
+                match item {
+                    Item::Gem(_) => {
+                        self.toast(format!("+1 {}  ({})", item.name(), money(item.value())))
+                    }
+                    Item::Mineral(_) => self.toast(format!("+1 {}  (for bombs)", item.name())),
+                }
             }
             Event::CargoFull => self.toast("Cargo hold is full! Fly up and sell at the shop."),
             Event::Landed { .. } => {
@@ -390,9 +550,48 @@ impl Renderer {
                 }
             }
             Event::StashRecovered { x, y, count } => {
-                self.toast(format!("Recovered {count} gems!"));
+                self.toast(format!("Recovered {count} lost items!"));
                 self.burst(*x, *y, 40, Color::new(0.8, 0.5, 1.0, 1.0), 6.0, 0.0, true);
             }
+            Event::Crafted => {
+                self.toast("Bomb crafted! Press B underground to drop one.");
+                self.burst(
+                    game.pod.x,
+                    game.pod.y - 0.5,
+                    30,
+                    Color::new(1.0, 0.6, 0.2, 1.0),
+                    4.0,
+                    0.0,
+                    true,
+                );
+            }
+            Event::CantCraft => {
+                if game.bombs >= BOMB_POUCH {
+                    self.toast("Bomb pouch is full");
+                } else {
+                    self.toast("A bomb needs 1 Coal, 1 Sulfur and 1 Potassium");
+                }
+            }
+            Event::BombPlaced { .. } => self.toast("Fuse lit! Get clear!"),
+            Event::Exploded { x, y } => {
+                self.flash = self.flash.max(0.35);
+                self.burst(*x, *y, 60, Color::new(1.0, 0.65, 0.2, 1.0), 9.0, 0.0, true);
+                self.burst(*x, *y, 30, Color::new(1.0, 0.95, 0.7, 1.0), 4.0, 0.0, true);
+                self.burst(
+                    *x,
+                    *y,
+                    40,
+                    tile_color(Tile::Dirt, *y as i32),
+                    7.0,
+                    14.0,
+                    false,
+                );
+            }
+            Event::MonsterKilled { x, y, .. } => {
+                self.toast("Got it!");
+                self.burst(*x, *y, 30, Color::new(0.6, 0.3, 0.8, 1.0), 6.0, 8.0, true);
+            }
+            Event::MonsterStunned { .. } => self.toast("The Deep Thing is stunned! Fly up!"),
         }
     }
 
@@ -400,7 +599,7 @@ impl Renderer {
         vec2(wx * TILE - self.view.x, wy * TILE - self.view.y)
     }
 
-    pub fn draw(&mut self, game: &Game, art: &Art) {
+    pub fn draw(&mut self, game: &Game, art: &Art, shake: bool) {
         let (sw, sh) = (screen_width(), screen_height());
         let world_w = WIDTH as f32 * TILE;
         let mut cam = self.cam;
@@ -410,15 +609,22 @@ impl Renderer {
             cam.x.clamp(sw / 2.0 - TILE, world_w + TILE - sw / 2.0)
         };
         cam.y = cam.y.max(-8.0 * TILE + sh / 2.0);
-        let amp = game.shake.min(1.2).powi(2) * 14.0;
+        let amp = if shake {
+            game.shake.min(1.2).powi(2) * 14.0
+        } else {
+            0.0
+        };
         let shake = vec2(gen_range(-amp, amp), gen_range(-amp, amp));
-        self.view = cam - vec2(sw / 2.0, sh / 2.0) + shake;
+        // Whole pixels only: text snaps to the pixel grid while sprites don't, so a
+        // fractional camera makes labels jitter against the art they sit on.
+        self.view = (cam - vec2(sw / 2.0, sh / 2.0) + shake).round();
 
         clear_background(Color::new(0.02, 0.02, 0.04, 1.0));
-        self.draw_sky(art, sw);
+        self.draw_sky(sw);
         self.draw_tiles(game, art, sw, sh);
         self.draw_shop(art);
         self.draw_stashes(game, art);
+        self.draw_bombs(game);
         for m in &game.monsters {
             self.draw_monster(m, art);
         }
@@ -444,39 +650,173 @@ impl Renderer {
         self.draw_toasts(sw);
     }
 
-    fn draw_sky(&self, art: &Art, sw: f32) {
+    fn draw_sky(&self, sw: f32) {
         if self.view.y >= 0.0 {
             return;
         }
-        let top = self.screen(0.0, -9.0).y;
         let ground = self.screen(0.0, 0.0).y;
-        draw_rectangle(
-            0.0,
-            0.0,
-            sw,
-            ground.max(0.0),
-            Color::new(0.45, 0.7, 0.95, 1.0),
-        );
-        let Some(sky) = art.get("sky") else {
+        if ground <= 0.0 {
             return;
-        };
-        let h = ground - top;
-        let w = h * sky.width() / sky.height();
-        // Half-speed parallax so the hills drift behind the shop.
-        let start = -((self.view.x * 0.5) % w + w) % w;
-        let mut x = start;
-        while x < sw {
+        }
+        // Soft vertical gradient: clear blue overhead, warm haze at the horizon.
+        let top = Color::new(0.33, 0.58, 0.9, 1.0);
+        let haze = Color::new(0.93, 0.9, 0.82, 1.0);
+        let bands = 32;
+        let span = ground.max(1.0);
+        for i in 0..bands {
+            let y = span * i as f32 / bands as f32;
+            let k = (i as f32 / bands as f32).powf(1.6);
+            draw_rectangle(0.0, y, sw, span / bands as f32 + 1.0, mix(top, haze, k));
+        }
+        let sun = vec2(sw * 0.78 - self.view.x * 0.01, ground - 300.0);
+        for (r, a) in [(260.0, 0.18), (130.0, 0.35), (60.0, 0.7)] {
             draw_texture_ex(
-                sky,
-                x,
-                top,
-                WHITE,
+                &self.glow,
+                sun.x - r,
+                sun.y - r,
+                Color::new(1.0, 0.95, 0.8, a),
                 DrawTextureParams {
-                    dest_size: Some(vec2(w + 1.0, h)),
+                    dest_size: Some(vec2(2.0 * r, 2.0 * r)),
                     ..Default::default()
                 },
             );
-            x += w;
+        }
+        draw_circle(sun.x, sun.y, 26.0, Color::new(1.0, 0.98, 0.9, 0.95));
+
+        self.draw_clouds(sw, ground, 0.04, 5.0, 0.9, 7, 11);
+        // Far to near: each ridge moves a little more with the camera than the last.
+        self.draw_ridge(
+            sw,
+            ground,
+            0.08,
+            230.0,
+            Color::new(0.62, 0.72, 0.86, 1.0),
+            1,
+            false,
+        );
+        self.draw_clouds(sw, ground, 0.12, 11.0, 0.6, 5, 12);
+        self.draw_ridge(
+            sw,
+            ground,
+            0.22,
+            150.0,
+            Color::new(0.5, 0.7, 0.66, 1.0),
+            2,
+            false,
+        );
+        self.draw_ridge(
+            sw,
+            ground,
+            0.45,
+            85.0,
+            Color::new(0.43, 0.66, 0.38, 1.0),
+            3,
+            true,
+        );
+        self.draw_birds(ground);
+    }
+
+    /// A rolling ridge line made of a few slow sine waves, drawn as thin columns.
+    #[allow(clippy::too_many_arguments)] // Private layer helper; the args are the layer.
+    fn draw_ridge(
+        &self,
+        sw: f32,
+        ground: f32,
+        parallax: f32,
+        height: f32,
+        color: Color,
+        seed: u64,
+        trees: bool,
+    ) {
+        let s = seed as f32;
+        let ridge = |u: f32| {
+            height
+                * (0.62
+                    + 0.22 * (u * 0.0021 + s).sin()
+                    + 0.12 * (u * 0.0057 + 2.0 * s).sin()
+                    + 0.05 * (u * 0.013 + 3.0 * s).sin())
+        };
+        let step = 4.0;
+        let offset = self.view.x * parallax;
+        let mut x = 0.0;
+        while x < sw {
+            let h = ridge(x + offset);
+            draw_rectangle(x, ground - h, step + 0.5, h, color);
+            // A lighter rim where the light catches the crest.
+            draw_rectangle(x, ground - h, step + 0.5, 2.0, mix(color, WHITE, 0.25));
+            x += step;
+        }
+        if !trees {
+            return;
+        }
+        // A loose woodland along the nearest ridge: leafy rounds, conifers,
+        // poplars and bushes, each standing on the hill where it's drawn.
+        let spacing = 30.0;
+        let first = (offset / spacing).floor() as i32 - 1;
+        for i in first..first + (sw / spacing) as i32 + 3 {
+            let h = world::hash(seed, i, 0, 21);
+            if world::unit(h) < 0.35 {
+                continue;
+            }
+            let u = i as f32 * spacing + world::unit(h >> 8) * 18.0;
+            let base = ground - ridge(u) + 3.0;
+            let s = 0.7 + 0.7 * world::unit(h >> 16);
+            draw_tree(u - offset, base, s, (h >> 24) % 4, world::unit(h >> 32));
+        }
+    }
+
+    /// A layer of fat, flat-bottomed cumulus clouds drifting with the wind.
+    #[allow(clippy::too_many_arguments)] // Private layer helper; the args are the layer.
+    fn draw_clouds(
+        &self,
+        sw: f32,
+        ground: f32,
+        parallax: f32,
+        wind: f32,
+        scale: f32,
+        count: i32,
+        seed: u64,
+    ) {
+        let margin = 260.0 * scale;
+        let span = sw + 2.0 * margin;
+        let shade = Color::new(0.84, 0.85, 0.95, 0.95);
+        let white = Color::new(1.0, 1.0, 0.99, 0.97);
+        for i in 0..count {
+            let h1 = world::unit(world::hash(seed, i, 1, 31));
+            let h2 = world::unit(world::hash(seed, i, 2, 31));
+            let r = (38.0 + 34.0 * h2) * scale;
+            let travel = h1 * span - self.t * wind - self.view.x * parallax;
+            let x = travel.rem_euclid(span) - margin;
+            let y = ground - (170.0 + 230.0 * h2) * (0.6 + scale * 0.5);
+            let puffs = [
+                (-1.25, 0.15, 0.6),
+                (-0.6, -0.15, 0.82),
+                (0.0, -0.38, 1.0),
+                (0.65, -0.12, 0.78),
+                (1.2, 0.15, 0.55),
+            ];
+            draw_ellipse(x, y + 0.22 * r, 1.9 * r, 0.42 * r, 0.0, shade);
+            for (dx, dy, k) in puffs {
+                draw_circle(x + dx * r, y + dy * r + 0.12 * r, k * r, shade);
+            }
+            for (dx, dy, k) in puffs {
+                draw_circle(x + dx * r, y + dy * r, k * r * 0.92, white);
+            }
+        }
+    }
+
+    fn draw_birds(&self, ground: f32) {
+        let ink = Color::new(0.18, 0.2, 0.28, 0.85);
+        for b in &self.birds {
+            let flap = (self.t * 9.0 + b.phase).sin();
+            let (x, y) = (
+                b.x,
+                ground - b.height + (self.t * 1.3 + b.phase).sin() * 3.0,
+            );
+            let span = 7.0 * b.size;
+            let lift = flap * 4.0 * b.size;
+            draw_line(x - span, y - lift, x, y, 1.6, ink);
+            draw_line(x, y, x + span, y - lift, 1.6, ink);
         }
     }
 
@@ -516,6 +856,7 @@ impl Renderer {
                     Tile::Dirt => format!("dirt_{band}_{variant}"),
                     Tile::Boulder => "boulder".to_string(),
                     Tile::Ore(t) => format!("ore_{t}"),
+                    Tile::Mineral(_) => format!("dirt_{band}_{variant}"),
                 };
                 if ty > 0 || tile != Tile::Dirt {
                     draw_rectangle(p.x, p.y, TILE, TILE, base);
@@ -539,6 +880,9 @@ impl Renderer {
                     None => {
                         draw_rectangle(p.x, p.y, TILE, TILE, tile_color(tile, ty));
                     }
+                }
+                if let Tile::Mineral(m) = tile {
+                    draw_mineral(p, m, world::hash(seed, tx, ty, 6));
                 }
             }
         }
@@ -578,6 +922,29 @@ impl Renderer {
             30.0,
             Color::new(0.35, 0.2, 0.1, 1.0),
         );
+    }
+
+    fn draw_bombs(&self, game: &Game) {
+        for b in &game.live_bombs {
+            let p = self.screen(b.x, b.y);
+            draw_circle(p.x, p.y, 11.0, Color::new(0.1, 0.1, 0.12, 1.0));
+            draw_circle(p.x - 3.5, p.y - 3.5, 3.5, Color::new(0.45, 0.45, 0.5, 1.0));
+            draw_rectangle(
+                p.x + 2.0,
+                p.y - 14.0,
+                5.0,
+                5.0,
+                Color::new(0.3, 0.3, 0.32, 1.0),
+            );
+            draw_line(
+                p.x + 4.5,
+                p.y - 14.0,
+                p.x + 7.0,
+                p.y - 19.0,
+                2.0,
+                Color::new(0.6, 0.5, 0.3, 1.0),
+            );
+        }
     }
 
     fn draw_stashes(&self, game: &Game, art: &Art) {
@@ -870,6 +1237,24 @@ impl Renderer {
             }
         }
 
+        // The fuse spark blinks faster as it burns down.
+        for b in &game.live_bombs {
+            let p = self.screen(b.x, b.y);
+            let urgency = 1.0 - (b.fuse / FUSE).clamp(0.0, 1.0);
+            let blink = 0.5 + 0.5 * (self.t * (6.0 + 22.0 * urgency)).sin();
+            let r = 14.0 + 10.0 * blink;
+            draw_texture_ex(
+                &self.glow,
+                p.x + 7.0 - r,
+                p.y - 19.0 - r,
+                Color::new(1.0, 0.5 + 0.3 * blink, 0.2, 0.9),
+                DrawTextureParams {
+                    dest_size: Some(vec2(2.0 * r, 2.0 * r)),
+                    ..Default::default()
+                },
+            );
+        }
+
         for s in &game.stashes {
             let p = self.screen(s.x, s.y);
             let r = TILE * (1.4 + 0.3 * (self.t * 3.0).sin());
@@ -949,7 +1334,19 @@ impl Renderer {
 
     fn draw_hud(&self, game: &Game, art: &Art, sw: f32, sh: f32) {
         let (x, y) = (14.0, 14.0);
-        draw_rectangle(x, y, 270.0, 176.0, PANEL);
+        let minerals: Vec<(Mineral, String)> = Mineral::ALL
+            .iter()
+            .map(|&m| (m, format!("{} {}", m.name(), game.count(Item::Mineral(m)))))
+            .collect();
+        let gap = 24.0;
+        let minerals_w: f32 = minerals
+            .iter()
+            .map(|(_, l)| 16.0 + measure_text(l, None, 20, 1.0).width + gap)
+            .sum::<f32>()
+            - gap;
+        // Grow to fit the widest row, so counts in the tens and hundreds never spill.
+        let width = 300.0f32.max(12.0 + minerals_w + 14.0);
+        draw_rectangle(x, y, width, 254.0, PANEL);
         let icon = |name: &str, row: f32| {
             if let Some(tex) = art.get(name) {
                 draw_texture_ex(
@@ -1036,6 +1433,20 @@ impl Renderer {
             },
         );
 
+        text(
+            &format!("Bombs {}/{BOMB_POUCH}   (B to drop)", game.bombs),
+            x + 12.0,
+            row_y(5.0),
+            22.0,
+            Color::new(1.0, 0.7, 0.4, 1.0),
+        );
+        let mut mx = x + 12.0;
+        for (m, label) in &minerals {
+            draw_circle(mx + 6.0, row_y(6.0) - 7.0, 6.0, mineral_color(*m));
+            text(label, mx + 16.0, row_y(6.0), 20.0, WHITE);
+            mx += 16.0 + measure_text(label, None, 20, 1.0).width + gap;
+        }
+
         if game.depth() < 1.0 && !game.at_shop() {
             text_centered(
                 "Arrow keys or WASD to drive and dig.  Up to fly.  Sell gems at the shop.",
@@ -1077,6 +1488,8 @@ pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
         KeyCode::Key6,
         KeyCode::Key7,
         KeyCode::Key8,
+        KeyCode::Key9,
+        KeyCode::Key0,
     ];
     let mut push = |action, label: String, detail: String, enabled: bool| {
         let key = keys[rows.len()];
@@ -1093,9 +1506,22 @@ pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
     let value = game.cargo_value();
     push(
         ShopAction::Sell,
-        "Sell cargo".into(),
+        "Sell gems".into(),
         format!("+{}", money(value)),
         value > 0,
+    );
+    let minerals = game.mineral_value();
+    push(
+        ShopAction::SellMinerals,
+        "Sell spare minerals".into(),
+        format!("+{}", money(minerals)),
+        minerals > 0,
+    );
+    push(
+        ShopAction::Craft,
+        format!("Craft bomb  ({}/{BOMB_POUCH})", game.bombs),
+        "C+S+P".into(),
+        game.can_craft(),
     );
     let fuel = game.refuel_cost();
     push(
@@ -1138,7 +1564,7 @@ fn draw_shop_panel(game: &Game, sw: f32) {
         PANEL,
     );
     text(
-        "SHOP  (click, or press 1-8)",
+        "SHOP  (click, or press 1-0)",
         first.rect.x,
         46.0,
         26.0,

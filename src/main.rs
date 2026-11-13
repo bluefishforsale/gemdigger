@@ -7,9 +7,11 @@
 mod art;
 mod audio;
 mod game;
+mod menu;
 mod monsters;
 mod render;
 mod save;
+mod settings;
 mod synth;
 mod world;
 
@@ -18,7 +20,9 @@ use std::path::{Path, PathBuf};
 use macroquad::prelude::*;
 
 use crate::game::{Event, Game, Input};
+use crate::menu::{Choice, Menu};
 use crate::render::Renderer;
+use crate::settings::Settings;
 
 const AUTOSAVE_SECS: f32 = 30.0;
 
@@ -33,14 +37,21 @@ fn main() {
         let _ = std::io::Write::write_all(&mut std::io::stdout(), line.as_bytes());
         return;
     }
+    let save_path = save::default_path();
+    let settings_path = save_path.as_deref().map(settings::path_beside);
+    let settings = settings_path
+        .as_deref()
+        .map(settings::load)
+        .unwrap_or_default();
     let conf = Conf {
         window_title: "GemDigger".to_string(),
         window_width: 1280,
         window_height: 720,
         high_dpi: true,
+        fullscreen: settings.fullscreen,
         ..Default::default()
     };
-    macroquad::Window::from_config(conf, run());
+    macroquad::Window::from_config(conf, run(save_path, settings_path, settings));
 }
 
 fn new_seed() -> u64 {
@@ -94,6 +105,7 @@ fn read_input() -> Input {
         right: down(&[KeyCode::Right, KeyCode::D]),
         up: down(&[KeyCode::Up, KeyCode::W, KeyCode::Space]),
         down: down(&[KeyCode::Down, KeyCode::S]),
+        bomb: is_key_pressed(KeyCode::B),
     }
 }
 
@@ -109,7 +121,7 @@ fn shop_input(game: &mut Game) {
     }
 }
 
-async fn run() {
+async fn run(save_path: Option<PathBuf>, settings_path: Option<PathBuf>, mut settings: Settings) {
     prevent_quit();
     clear_background(BLACK);
     draw_text("GemDigger is warming up...", 40.0, 80.0, 40.0, WHITE);
@@ -124,7 +136,6 @@ async fn run() {
             None
         }
     };
-    let save_path = save::default_path();
     let (mut game, notice) = load_game(save_path.as_deref());
     let mut renderer = Renderer::new();
     if let Some(n) = notice {
@@ -134,12 +145,45 @@ async fn run() {
         s.start();
     }
 
+    let mut menu = Menu::new();
     let mut since_save = 0.0;
     loop {
+        let choice = menu.input(&settings);
+        let fullscreen_key = is_key_pressed(KeyCode::F11);
+        if choice == Some(Choice::Quit) {
+            store(save_path.as_ref(), &game, &mut renderer);
+            break;
+        }
+        if choice.is_some() || fullscreen_key {
+            match choice {
+                Some(Choice::ToggleMusic) => settings.music = !settings.music,
+                Some(Choice::ToggleSound) => settings.sound = !settings.sound,
+                Some(Choice::ToggleShake) => settings.shake = !settings.shake,
+                Some(Choice::ToggleFullscreen) => settings.fullscreen = !settings.fullscreen,
+                _ if fullscreen_key => settings.fullscreen = !settings.fullscreen,
+                _ => {}
+            }
+            set_fullscreen(settings.fullscreen);
+            if let Some(path) = &settings_path
+                && let Err(e) = save::write(path, &settings)
+            {
+                eprintln!("{e:#}");
+            }
+        }
+
         // Clamped so a stall (window drag, sleep) can't tunnel the pod through rock.
-        let dt = get_frame_time().min(0.05);
-        shop_input(&mut game);
-        let events = game.update(dt, read_input());
+        // Zero while paused, so the world holds still behind the menu.
+        let dt = if menu.open {
+            0.0
+        } else {
+            get_frame_time().min(0.05)
+        };
+        let events = if menu.open {
+            Vec::new()
+        } else {
+            shop_input(&mut game);
+            game.update(dt, read_input())
+        };
 
         since_save += dt;
         let milestone = events.iter().any(|e| {
@@ -157,11 +201,12 @@ async fn run() {
         }
 
         if let Some(s) = &sound {
-            s.update(&game);
-            s.react(&events);
+            s.update(&game, &settings);
+            s.react(&events, &settings);
         }
         renderer.update(dt, &game, &events);
-        renderer.draw(&game, &art);
+        renderer.draw(&game, &art, settings.shake);
+        menu.draw(&settings);
 
         if is_quit_requested() {
             store(save_path.as_ref(), &game, &mut renderer);

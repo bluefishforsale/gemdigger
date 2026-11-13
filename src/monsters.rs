@@ -100,6 +100,8 @@ pub struct Monster {
     pub dir: f32,
     pub phase: Phase,
     pub age: f32,
+    /// Seconds left frozen by a bomb blast.
+    pub stun: f32,
 }
 
 impl Monster {

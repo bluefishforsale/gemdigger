@@ -4,19 +4,25 @@
 use serde::{Deserialize, Serialize};
 
 use crate::monsters::{Monster, Phase, Size};
-use crate::world::{self, Tile, WIDTH, World};
+use crate::world::{self, Mineral, Tile, WIDTH, World};
 
 /// Half the pod's width and height, in tiles.
 pub const POD_HALF: f32 = 0.4;
 /// Where the pod appears after dying: standing on the surface by the shop.
-pub const SPAWN: (f32, f32) = (15.0, -POD_HALF);
+pub const SPAWN: (f32, f32) = (48.0, -POD_HALF);
 /// The columns the shop covers on the surface.
-pub const SHOP_COLUMNS: (f32, f32) = (12.0, 18.0);
+pub const SHOP_COLUMNS: (f32, f32) = (45.0, 51.0);
 pub const MAX_LEVEL: u8 = 5;
 pub const ORE_NAMES: [&str; 6] = ["Copper", "Silver", "Gold", "Emerald", "Ruby", "Starcrystal"];
 const ORE_VALUES: [u64; 6] = [10, 25, 60, 150, 400, 1000];
 const FUEL_PRICE: f32 = 1.0;
 const REPAIR_PRICE: f32 = 2.0;
+const MINERAL_VALUE: u64 = 5;
+/// Bombs carried at once; they ride in their own pouch, not the cargo hold.
+pub const BOMB_POUCH: u8 = 3;
+/// Seconds from dropping a bomb to the blast.
+pub const FUSE: f32 = 2.5;
+const BLAST_HURT: f32 = 30.0;
 const MONSTER_DEPTH: f32 = 60.0;
 const MAX_MONSTERS: usize = 3;
 
@@ -33,6 +39,37 @@ pub fn ore_value(tier: u8) -> u64 {
     ORE_VALUES.get(tier as usize).copied().unwrap_or(0)
 }
 
+/// Anything the cargo hold can carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Item {
+    Gem(u8),
+    Mineral(Mineral),
+}
+
+impl Item {
+    pub fn name(self) -> &'static str {
+        match self {
+            Item::Gem(t) => ORE_NAMES.get(t as usize).copied().unwrap_or("Gem"),
+            Item::Mineral(m) => m.name(),
+        }
+    }
+
+    pub fn value(self) -> u64 {
+        match self {
+            Item::Gem(t) => ore_value(t),
+            Item::Mineral(_) => MINERAL_VALUE,
+        }
+    }
+
+    fn from_tile(tile: Tile) -> Option<Item> {
+        match tile {
+            Tile::Ore(t) => Some(Item::Gem(t)),
+            Tile::Mineral(m) => Some(Item::Mineral(m)),
+            _ => None,
+        }
+    }
+}
+
 /// What the player is pressing this frame.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Input {
@@ -40,6 +77,8 @@ pub struct Input {
     pub right: bool,
     pub up: bool,
     pub down: bool,
+    /// Pressed this frame (not held): drop a bomb.
+    pub bomb: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,7 +184,24 @@ impl Levels {
 pub struct Stash {
     pub x: f32,
     pub y: f32,
-    pub cargo: Vec<u8>,
+    pub cargo: Vec<Item>,
+    #[serde(default)]
+    pub bombs: u8,
+}
+
+impl Stash {
+    fn is_empty(&self) -> bool {
+        self.cargo.is_empty() && self.bombs == 0
+    }
+}
+
+/// A lit bomb, falling until it lands and then counting down.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Bomb {
+    pub x: f32,
+    pub y: f32,
+    pub vy: f32,
+    pub fuse: f32,
 }
 
 /// A dig in progress: the pod slides from `from` into the tile at (tx, ty).
@@ -195,6 +251,8 @@ impl Pod {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShopAction {
     Sell,
+    SellMinerals,
+    Craft,
     Refuel,
     Repair,
     Buy(Upgrade),
@@ -213,7 +271,7 @@ pub enum Event {
         tile: Tile,
     },
     Pickup {
-        tier: u8,
+        item: Item,
         x: f32,
         y: f32,
     },
@@ -254,6 +312,26 @@ pub enum Event {
         y: f32,
         count: usize,
     },
+    Crafted,
+    /// Craft pressed without the ingredients or with a full pouch.
+    CantCraft,
+    BombPlaced {
+        x: f32,
+        y: f32,
+    },
+    Exploded {
+        x: f32,
+        y: f32,
+    },
+    MonsterKilled {
+        size: Size,
+        x: f32,
+        y: f32,
+    },
+    MonsterStunned {
+        x: f32,
+        y: f32,
+    },
 }
 
 /// Small xorshift generator so game randomness is seedable in tests.
@@ -287,7 +365,9 @@ pub struct Game {
     pub pod: Pod,
     pub money: u64,
     pub levels: Levels,
-    pub cargo: Vec<u8>,
+    pub cargo: Vec<Item>,
+    pub bombs: u8,
+    pub live_bombs: Vec<Bomb>,
     pub stashes: Vec<Stash>,
     pub monsters: Vec<Monster>,
     pub deaths: u32,
@@ -310,6 +390,8 @@ impl Game {
             money: 0,
             levels,
             cargo: Vec::new(),
+            bombs: 0,
+            live_bombs: Vec::new(),
             stashes: Vec::new(),
             monsters: Vec::new(),
             deaths: 0,
@@ -333,8 +415,33 @@ impl Game {
         p.y < 0.5 && p.dig.is_none() && (SHOP_COLUMNS.0..SHOP_COLUMNS.1).contains(&p.x)
     }
 
+    /// What the gems in the hold sell for; minerals are kept for crafting.
     pub fn cargo_value(&self) -> u64 {
-        self.cargo.iter().map(|&t| ore_value(t)).sum()
+        self.cargo
+            .iter()
+            .filter(|i| matches!(i, Item::Gem(_)))
+            .map(|i| i.value())
+            .sum()
+    }
+
+    pub fn mineral_value(&self) -> u64 {
+        self.cargo
+            .iter()
+            .filter(|i| matches!(i, Item::Mineral(_)))
+            .map(|i| i.value())
+            .sum()
+    }
+
+    pub fn count(&self, item: Item) -> usize {
+        self.cargo.iter().filter(|&&i| i == item).count()
+    }
+
+    /// One of each mineral in the hold, and room in the pouch.
+    pub fn can_craft(&self) -> bool {
+        self.bombs < BOMB_POUCH
+            && Mineral::ALL
+                .iter()
+                .all(|&m| self.count(Item::Mineral(m)) > 0)
     }
 
     pub fn refuel_cost(&self) -> u64 {
@@ -351,6 +458,10 @@ impl Game {
         self.shake = (self.shake - dt * 1.5).max(0.0);
         self.pod.invuln = (self.pod.invuln - dt).max(0.0);
         self.update_pod(dt, input);
+        if input.bomb {
+            self.drop_bomb();
+        }
+        self.update_bombs(dt);
         self.update_monsters(dt);
         self.recover_stashes();
         self.check_fuel(dt);
@@ -368,9 +479,30 @@ impl Game {
                 let amount = self.cargo_value();
                 if amount > 0 {
                     self.money += amount;
-                    self.cargo.clear();
+                    self.cargo.retain(|i| !matches!(i, Item::Gem(_)));
                     self.events.push(Event::Sold { amount });
                 }
+            }
+            ShopAction::SellMinerals => {
+                let amount = self.mineral_value();
+                if amount > 0 {
+                    self.money += amount;
+                    self.cargo.retain(|i| !matches!(i, Item::Mineral(_)));
+                    self.events.push(Event::Sold { amount });
+                }
+            }
+            ShopAction::Craft => {
+                if !self.can_craft() {
+                    self.events.push(Event::CantCraft);
+                    return;
+                }
+                for m in Mineral::ALL {
+                    if let Some(i) = self.cargo.iter().position(|&c| c == Item::Mineral(m)) {
+                        self.cargo.remove(i);
+                    }
+                }
+                self.bombs += 1;
+                self.events.push(Event::Crafted);
             }
             ShopAction::Refuel => {
                 let need = self.levels.fuel_max() - self.pod.fuel;
@@ -474,19 +606,109 @@ impl Game {
             y: dig.ty,
             tile,
         });
-        let Tile::Ore(tier) = tile else {
+        self.collect(tile, dig.tx, dig.ty);
+    }
+
+    /// Puts a broken tile's gem or mineral in the hold, if it has one and there's room.
+    fn collect(&mut self, tile: Tile, tx: i32, ty: i32) {
+        let Some(item) = Item::from_tile(tile) else {
             return;
         };
         if self.cargo.len() >= self.levels.cargo_cap() {
             self.events.push(Event::CargoFull);
             return;
         }
-        self.cargo.push(tier);
+        self.cargo.push(item);
         self.events.push(Event::Pickup {
-            tier,
-            x: dig.tx as f32 + 0.5,
-            y: dig.ty as f32 + 0.5,
+            item,
+            x: tx as f32 + 0.5,
+            y: ty as f32 + 0.5,
         });
+    }
+
+    fn drop_bomb(&mut self) {
+        // Underground only: no blowing up the shop.
+        if self.bombs == 0 || self.pod.y < 1.0 || self.pod.dig.is_some() {
+            return;
+        }
+        self.bombs -= 1;
+        let (x, y) = (self.pod.x, self.pod.y);
+        self.live_bombs.push(Bomb {
+            x,
+            y,
+            vy: 0.0,
+            fuse: FUSE,
+        });
+        self.events.push(Event::BombPlaced { x, y });
+    }
+
+    fn update_bombs(&mut self, dt: f32) {
+        let mut blasts = Vec::new();
+        for b in &mut self.live_bombs {
+            b.fuse -= dt;
+            if b.fuse <= 0.0 {
+                blasts.push((b.x, b.y));
+                continue;
+            }
+            b.vy = (b.vy + GRAVITY * dt).min(MAX_FALL);
+            let ny = b.y + b.vy * dt;
+            let below = (ny + 0.25).floor() as i32;
+            if self.world.get(b.x.floor() as i32, below).is_solid() {
+                b.y = below as f32 - 0.25;
+                b.vy = 0.0;
+            } else {
+                b.y = ny;
+            }
+        }
+        self.live_bombs.retain(|b| b.fuse > 0.0);
+        for (x, y) in blasts {
+            self.explode(x, y);
+        }
+    }
+
+    /// Clears the 3x3 around the bomb (boulders too, never walls), keeps what
+    /// it can of the gems and minerals, and catches anything close.
+    fn explode(&mut self, x: f32, y: f32) {
+        let (cx, cy) = (x.floor() as i32, y.floor() as i32);
+        for ty in cy - 1..=cy + 1 {
+            for tx in cx - 1..=cx + 1 {
+                let tile = self.world.get(tx, ty);
+                if matches!(tile, Tile::Air | Tile::Wall) || ty < 0 {
+                    continue;
+                }
+                self.world.set(tx, ty, Tile::Air);
+                self.collect(tile, tx, ty);
+            }
+        }
+        self.events.push(Event::Exploded { x, y });
+        self.shake = self.shake.max(1.0);
+
+        let mut killed = Vec::new();
+        for (i, m) in self.monsters.iter_mut().enumerate() {
+            let (w, _) = m.size.dims();
+            if (m.x - x).hypot(m.y - y) > 2.2 + w * 0.3 {
+                continue;
+            }
+            if m.size == Size::Huge {
+                m.stun = 4.0;
+                self.events.push(Event::MonsterStunned { x: m.x, y: m.y });
+            } else {
+                killed.push(i);
+                self.events.push(Event::MonsterKilled {
+                    size: m.size,
+                    x: m.x,
+                    y: m.y,
+                });
+            }
+        }
+        for i in killed.into_iter().rev() {
+            self.monsters.remove(i);
+        }
+
+        if self.pod.invuln <= 0.0 && (self.pod.x - x).hypot(self.pod.y - y) < 2.0 {
+            self.pod.invuln = 1.0;
+            self.hurt(BLAST_HURT, "Caught in your own blast");
+        }
     }
 
     fn update_pod(&mut self, dt: f32, input: Input) {
@@ -586,12 +808,13 @@ impl Game {
             Some(dig) => dig.from,
             None => (self.pod.x, self.pod.y),
         };
-        let dropped = self.cargo.len();
+        let dropped = self.cargo.len() + self.bombs as usize;
         if dropped > 0 {
             self.stashes.push(Stash {
                 x,
                 y,
                 cargo: std::mem::take(&mut self.cargo),
+                bombs: std::mem::take(&mut self.bombs),
             });
         }
         self.deaths += 1;
@@ -630,20 +853,25 @@ impl Game {
         let cap = self.levels.cargo_cap();
         let (px, py) = (self.pod.x, self.pod.y);
         for stash in &mut self.stashes {
-            let close = (stash.x - px).hypot(stash.y - py) < 0.9;
-            let room = cap.saturating_sub(self.cargo.len());
-            if !close || room == 0 {
+            if (stash.x - px).hypot(stash.y - py) >= 0.9 {
                 continue;
             }
-            let count = room.min(stash.cargo.len());
-            self.cargo.extend(stash.cargo.drain(..count));
+            let room = cap.saturating_sub(self.cargo.len());
+            let items = room.min(stash.cargo.len());
+            let bombs = BOMB_POUCH.saturating_sub(self.bombs).min(stash.bombs);
+            if items + bombs as usize == 0 {
+                continue;
+            }
+            self.cargo.extend(stash.cargo.drain(..items));
+            self.bombs += bombs;
+            stash.bombs -= bombs;
             self.events.push(Event::StashRecovered {
                 x: stash.x,
                 y: stash.y,
-                count,
+                count: items + bombs as usize,
             });
         }
-        self.stashes.retain(|s| !s.cargo.is_empty());
+        self.stashes.retain(|s| !s.is_empty());
     }
 
     fn spawn_monster(&mut self) {
@@ -675,6 +903,7 @@ impl Game {
             dir: -side,
             phase: Phase::Warning(size.warning()),
             age: 0.0,
+            stun: 0.0,
         });
         self.events.push(Event::MonsterWarning { size, x, y });
     }
@@ -710,6 +939,10 @@ impl Game {
                     x: m.x,
                     y: m.y,
                 });
+            }
+            if m.stun > 0.0 {
+                m.stun -= dt;
+                continue;
             }
             let (w, h) = m.size.dims();
             if (py - m.y).abs() < h / 2.0 + 1.2 {
@@ -765,6 +998,7 @@ impl Game {
             fuel: self.pod.fuel,
             hull: self.pod.hull,
             cargo: self.cargo.clone(),
+            bombs: self.bombs,
             stashes: self.stashes.clone(),
             changes: self.world.changes(),
             deaths: self.deaths,
@@ -782,10 +1016,30 @@ impl Game {
         game.pod.fuel = s.fuel.clamp(0.0, game.levels.fuel_max());
         game.pod.hull = s.hull.clamp(1.0, game.levels.hull_max());
         game.cargo = s.cargo;
+        game.bombs = s.bombs.min(BOMB_POUCH);
         game.stashes = s.stashes;
         game.deaths = s.deaths;
         game.max_depth = s.max_depth;
+        game.free_pod();
         game
+    }
+
+    /// Clears rock (never walls) from under the pod, for saves made against a
+    /// differently generated world.
+    fn free_pod(&mut self) {
+        let (x, y) = (self.pod.x, self.pod.y);
+        let x0 = (x - POD_HALF + EPS).floor() as i32;
+        let x1 = (x + POD_HALF - EPS).floor() as i32;
+        let y0 = (y - POD_HALF + EPS).floor() as i32;
+        let y1 = (y + POD_HALF - EPS).floor() as i32;
+        for ty in y0..=y1 {
+            for tx in x0..=x1 {
+                let tile = self.world.get(tx, ty);
+                if tile.is_solid() && tile != Tile::Wall {
+                    self.world.set(tx, ty, Tile::Air);
+                }
+            }
+        }
     }
 }
 
@@ -800,7 +1054,9 @@ pub struct SaveData {
     pub y: f32,
     pub fuel: f32,
     pub hull: f32,
-    pub cargo: Vec<u8>,
+    pub cargo: Vec<Item>,
+    #[serde(default)]
+    pub bombs: u8,
     pub stashes: Vec<Stash>,
     pub changes: Vec<(i32, i32, Tile)>,
     pub deaths: u32,
@@ -808,7 +1064,63 @@ pub struct SaveData {
 }
 
 impl SaveData {
-    pub const VERSION: u32 = 1;
+    pub const VERSION: u32 = 2;
+}
+
+/// The first save format, where cargo was a list of gem tiers. Kept only so
+/// those saves load; they're upgraded on the next write.
+#[derive(Deserialize)]
+pub struct SaveDataV1 {
+    seed: u64,
+    money: u64,
+    levels: Levels,
+    x: f32,
+    y: f32,
+    fuel: f32,
+    hull: f32,
+    cargo: Vec<u8>,
+    stashes: Vec<StashV1>,
+    changes: Vec<(i32, i32, Tile)>,
+    deaths: u32,
+    max_depth: f32,
+}
+
+#[derive(Deserialize)]
+struct StashV1 {
+    x: f32,
+    y: f32,
+    cargo: Vec<u8>,
+}
+
+impl From<SaveDataV1> for SaveData {
+    fn from(v1: SaveDataV1) -> SaveData {
+        let gems = |tiers: Vec<u8>| tiers.into_iter().map(Item::Gem).collect();
+        SaveData {
+            version: SaveData::VERSION,
+            seed: v1.seed,
+            money: v1.money,
+            levels: v1.levels,
+            x: v1.x,
+            y: v1.y,
+            fuel: v1.fuel,
+            hull: v1.hull,
+            cargo: gems(v1.cargo),
+            bombs: 0,
+            stashes: v1
+                .stashes
+                .into_iter()
+                .map(|s| Stash {
+                    x: s.x,
+                    y: s.y,
+                    cargo: gems(s.cargo),
+                    bombs: 0,
+                })
+                .collect(),
+            changes: v1.changes,
+            deaths: v1.deaths,
+            max_depth: v1.max_depth,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -816,6 +1128,10 @@ mod tests {
     use super::*;
 
     const DT: f32 = 1.0 / 60.0;
+
+    fn gems(tiers: &[u8]) -> Vec<Item> {
+        tiers.iter().map(|&t| Item::Gem(t)).collect()
+    }
 
     fn run(game: &mut Game, secs: f32, input: Input) -> Vec<Event> {
         let mut events = Vec::new();
@@ -853,6 +1169,7 @@ mod tests {
             dir: 1.0,
             phase: Phase::Active,
             age: 0.0,
+            stun: 0.0,
         });
     }
 
@@ -871,7 +1188,7 @@ mod tests {
         let mut g = game_at_depth(80);
         g.money = 500;
         g.levels.drill = 2;
-        g.cargo = vec![2, 3, 3];
+        g.cargo = gems(&[2, 3, 3]);
         let at = (g.pod.x, g.pod.y);
         g.die("test".into());
         assert_eq!(g.money, 500);
@@ -882,7 +1199,8 @@ mod tests {
             vec![Stash {
                 x: at.0,
                 y: at.1,
-                cargo: vec![2, 3, 3]
+                cargo: gems(&[2, 3, 3]),
+                bombs: 0,
             }]
         );
         assert_eq!((g.pod.x, g.pod.y), SPAWN, "did not respawn at the surface");
@@ -900,10 +1218,10 @@ mod tests {
     #[test]
     fn repeated_deaths_keep_every_stash() {
         let mut g = game_at_depth(80);
-        g.cargo = vec![1];
+        g.cargo = gems(&[1]);
         g.die("one".into());
         g.pod.y = 120.0;
-        g.cargo = vec![4];
+        g.cargo = gems(&[4]);
         g.die("two".into());
         assert_eq!(g.stashes.len(), 2, "stashes: {:?}", g.stashes);
     }
@@ -913,11 +1231,12 @@ mod tests {
     fn stash_recovery_respects_cargo_capacity() {
         let mut g = game_at_depth(80);
         let cap = g.levels.cargo_cap();
-        g.cargo = vec![0; cap - 2];
+        g.cargo = vec![Item::Gem(0); cap - 2];
         g.stashes.push(Stash {
             x: g.pod.x,
             y: g.pod.y,
-            cargo: vec![5; 5],
+            cargo: gems(&[5; 5]),
+            bombs: 0,
         });
         g.update(DT, Input::default());
         assert_eq!(g.cargo.len(), cap);
@@ -931,7 +1250,7 @@ mod tests {
         let mut g = game_at_depth(600);
         g.levels.hull = MAX_LEVEL;
         g.pod.hull = g.levels.hull_max();
-        g.cargo = vec![5];
+        g.cargo = gems(&[5]);
         huge_monster_on(&mut g);
         let events = g.update(DT, Input::default());
         assert!(
@@ -968,6 +1287,7 @@ mod tests {
                 dir: 1.0,
                 phase: Phase::Active,
                 age: 0.0,
+                stun: 0.0,
             });
         }
         for step in 0..(3.0 / DT) as usize {
@@ -1006,6 +1326,7 @@ mod tests {
             dir: 1.0,
             phase: Phase::Active,
             age: 0.0,
+            stun: 0.0,
         });
         let events = run(
             &mut g,
@@ -1034,7 +1355,7 @@ mod tests {
     #[test]
     fn selling_converts_cargo_to_money() {
         let mut g = Game::new(1);
-        g.cargo = vec![0, 2];
+        g.cargo = gems(&[0, 2]);
         g.apply(ShopAction::Sell);
         assert_eq!(g.money, ore_value(0) + ore_value(2));
         assert!(g.cargo.is_empty());
@@ -1070,17 +1391,178 @@ mod tests {
         let mut g = game_at_depth(90);
         g.money = 1234;
         g.levels.lamp = 3;
-        g.cargo = vec![1, 2];
+        g.cargo = gems(&[1, 2]);
         g.stashes.push(Stash {
             x: 3.5,
             y: 200.5,
-            cargo: vec![4],
+            cargo: gems(&[4]),
+            bombs: 0,
         });
         let data = g.to_save();
         let json = serde_json::to_string(&data).unwrap();
         let back = Game::from_save(serde_json::from_str(&json).unwrap());
         assert_eq!(back.to_save(), data);
         assert_eq!(back.world.get(5, 90), Tile::Air);
+    }
+
+    /// A save from an older or narrower world can land the pod in rock that
+    /// generation now places there; loading must free it instead of trapping it.
+    #[test]
+    fn loading_frees_a_pod_buried_in_rock() {
+        let mut data = Game::new(4).to_save();
+        let (x, y) = (20.5, 300.5);
+        data.x = x;
+        data.y = y;
+        let g = Game::from_save(data.clone());
+        assert!(!g.collides(x, y), "pod still buried after load");
+        assert!(
+            g.world.get(x.floor() as i32, y.floor() as i32) == Tile::Air,
+            "pod's own tile not cleared"
+        );
+    }
+
+    fn minerals() -> Vec<Item> {
+        Mineral::ALL.iter().map(|&m| Item::Mineral(m)).collect()
+    }
+
+    fn bomb_at(g: &mut Game, x: f32, y: f32) {
+        g.live_bombs.push(Bomb {
+            x,
+            y,
+            vy: 0.0,
+            fuse: 0.01,
+        });
+        g.update(DT, Input::default());
+    }
+
+    /// Crafting turns exactly one Coal, Sulfur and Potassium into one bomb.
+    #[test]
+    fn crafting_uses_one_of_each_mineral() {
+        let mut g = Game::new(1);
+        g.cargo = minerals();
+        g.cargo.push(Item::Mineral(Mineral::Coal));
+        g.apply(ShopAction::Craft);
+        assert_eq!(g.bombs, 1);
+        assert_eq!(
+            g.cargo,
+            vec![Item::Mineral(Mineral::Coal)],
+            "wrong ingredients used"
+        );
+    }
+
+    /// Missing an ingredient, or a full pouch, crafts nothing and costs nothing.
+    #[test]
+    fn crafting_is_refused_without_ingredients_or_room() {
+        let mut g = Game::new(1);
+        g.cargo = vec![Item::Mineral(Mineral::Coal), Item::Mineral(Mineral::Sulfur)];
+        g.apply(ShopAction::Craft);
+        assert_eq!((g.bombs, g.cargo.len()), (0, 2));
+        g.cargo = minerals();
+        g.bombs = BOMB_POUCH;
+        g.apply(ShopAction::Craft);
+        assert_eq!(
+            (g.bombs, g.cargo.len()),
+            (BOMB_POUCH, 3),
+            "crafted past a full pouch"
+        );
+    }
+
+    /// "Sell gems" must never sell the minerals she's saving for a bomb.
+    #[test]
+    fn selling_gems_keeps_minerals() {
+        let mut g = Game::new(1);
+        g.cargo = minerals();
+        g.cargo.push(Item::Gem(2));
+        g.apply(ShopAction::Sell);
+        assert_eq!(g.money, ore_value(2));
+        assert_eq!(g.cargo, minerals());
+    }
+
+    /// Bombs open boulders (which can't be drilled) but never the bedrock walls.
+    #[test]
+    fn blast_breaks_boulders_but_not_walls() {
+        let mut g = game_at_depth(200);
+        g.pod.y = 150.0; // well clear of the blast
+        g.world.set(0, 200, Tile::Boulder);
+        g.world.set(1, 201, Tile::Boulder);
+        bomb_at(&mut g, 0.5, 200.5);
+        assert_eq!(g.world.get(0, 200), Tile::Air);
+        assert_eq!(g.world.get(1, 201), Tile::Air);
+        assert_eq!(g.world.get(-1, 200), Tile::Wall, "blast broke the wall");
+    }
+
+    /// A blast kills anything up to Large, but the Deep Thing is only frozen.
+    #[test]
+    fn blast_kills_monsters_but_only_stuns_the_deep_thing() {
+        let mut g = game_at_depth(600);
+        for (size, x) in [(Size::Large, 20.0), (Size::Huge, 40.0)] {
+            g.monsters.push(Monster {
+                size,
+                x,
+                y: 600.5,
+                dir: 1.0,
+                phase: Phase::Active,
+                age: 0.0,
+                stun: 0.0,
+            });
+        }
+        bomb_at(&mut g, 20.0, 600.5);
+        bomb_at(&mut g, 40.0, 600.5);
+        assert_eq!(g.monsters.len(), 1, "monsters left: {:?}", g.monsters);
+        let deep = g.monsters[0].clone();
+        assert_eq!(deep.size, Size::Huge);
+        for _ in 0..60 {
+            g.update(DT, Input::default());
+        }
+        assert_eq!(g.monsters[0].x, deep.x, "stunned Deep Thing moved");
+    }
+
+    /// Standing on your own bomb hurts; getting clear doesn't.
+    #[test]
+    fn blast_hurts_the_pod_only_when_close() {
+        let mut g = game_at_depth(100);
+        let full = g.pod.hull;
+        let (px, py) = (g.pod.x, g.pod.y);
+        bomb_at(&mut g, px + 5.0, py);
+        assert_eq!(g.pod.hull, full, "hurt from 5 tiles away");
+        bomb_at(&mut g, px, py);
+        assert!(g.pod.hull < full, "not hurt by a bomb underneath");
+    }
+
+    /// No bombs at the surface, so the shop is safe.
+    #[test]
+    fn bombs_cannot_be_dropped_at_the_surface() {
+        let mut g = Game::new(1);
+        g.bombs = 1;
+        g.update(
+            DT,
+            Input {
+                bomb: true,
+                ..Input::default()
+            },
+        );
+        assert_eq!((g.bombs, g.live_bombs.len()), (1, 0));
+    }
+
+    /// Death leaves bombs and minerals in the stash too, and recovery refills the pouch.
+    #[test]
+    fn stash_keeps_bombs_and_minerals() {
+        let mut g = game_at_depth(80);
+        g.cargo = minerals();
+        g.bombs = 2;
+        let at = (g.pod.x, g.pod.y);
+        g.die("test".into());
+        assert_eq!(g.bombs, 0);
+        assert_eq!(g.stashes[0].bombs, 2);
+        g.pod.x = at.0;
+        g.pod.y = at.1;
+        g.update(DT, Input::default());
+        assert_eq!(
+            (g.bombs, g.cargo.len()),
+            (2, 3),
+            "stash not fully recovered"
+        );
+        assert!(g.stashes.is_empty());
     }
 
     /// Saving mid-dig must not put the pod inside rock on reload.

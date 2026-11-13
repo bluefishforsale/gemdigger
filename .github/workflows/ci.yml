@@ -27,6 +27,16 @@ jobs:
           if ($p.ExitCode -ne 0 -or $line -ne "$($pkg.name) $($pkg.version)") { throw "unexpected --version output (exit $($p.ExitCode)): $line" }
           $line
 
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --locked --release
+      - run: ./target/release/gemdigger --version
+
   scripts:
     runs-on: windows-latest
     steps:
