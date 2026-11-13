@@ -22,7 +22,7 @@ That downloads the latest release through the [GitHub CLI](https://cli.github.co
 
 ## Installing on macOS
 
-Each release also has `gemdigger-macos.zip`, a universal `GemDigger.app` for Apple Silicon and Intel Macs. It isn't signed with an Apple developer ID, so the first launch needs a right-click and Open (or System Settings, Privacy & Security, Open Anyway).
+Each release also has `gemdigger-macos.zip`, a universal `GemDigger.app` for Apple Silicon and Intel Macs, signed with a Developer ID and notarized by Apple, so it opens like any other app.
 
 ## How it's built
 
@@ -33,6 +33,12 @@ The map is never stored: every tile comes from a hash of the world seed and its 
 The art comes from an image-model sprite atlas in `art/atlas.png`, sliced into named sprites under `assets/sprites/` by `tools/slice_atlas.py` and baked into the exe at build time. To swap art without rebuilding, drop a PNG with the same name into an `assets/sprites` folder next to the exe; sounds work the same way from `assets/sounds` (`.ogg` or `.wav`, named like `pickup_3` or `music_4`). If the atlas is regenerated, its sprite boxes need re-measuring, and the script's docstring says how.
 
 For testing without touching a real save, point `GEMDIGGER_SAVE` at another file.
+
+## Signing
+
+Every release is signed, and a tag with any signing input missing refuses to build at all rather than ship something unsigned. Windows builds get an Authenticode signature from Azure Artifact Signing; the Mac app gets a Developer ID signature, the hardened runtime, and Apple notarization stapled to it. Both identities are Terrac Skiens's and are shared with signal-agent, whose `docs/signing-setup.md` covers creating them.
+
+The inputs live in this repo's `release` environment, which only `v*` tags can deploy to, so pull requests never see them. It holds the seven `APPLE_*` secrets and `AZURE_TENANT_ID`/`AZURE_CLIENT_ID` (all the same values as signal-agent), a random `KEYCHAIN_PASSWORD` for the throwaway CI keychain, and three variables naming the Azure signing setup: `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT` and `AZURE_CERT_PROFILE`. The `signal-agent-ci` app registration also needs a second federated credential trusting this repo, subject `repo:bluefishforsale/gemdigger:environment:release`, or Azure login fails from here.
 
 ## Checks
 
