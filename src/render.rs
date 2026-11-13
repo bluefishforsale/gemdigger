@@ -71,6 +71,17 @@ pub struct Renderer {
     glow: Texture2D,
     t: f32,
     flash: f32,
+    birds: Vec<Bird>,
+    next_flock: f32,
+}
+
+/// A small bird crossing the sky, in screen space above the horizon.
+struct Bird {
+    x: f32,
+    height: f32,
+    vx: f32,
+    phase: f32,
+    size: f32,
 }
 
 fn radial(size: u16, alpha: impl Fn(f32) -> f32) -> Texture2D {
@@ -164,6 +175,8 @@ impl Renderer {
             glow: radial(64, |r| (1.0 - r).powi(2)),
             t: 0.0,
             flash: 0.0,
+            birds: Vec::new(),
+            next_flock: 4.0,
         }
     }
 
@@ -281,6 +294,34 @@ impl Renderer {
             toast.age += dt;
         }
         self.toasts.retain(|t| t.age < 3.5);
+
+        // Every so often a small flock crosses the sky, in a loose V.
+        let sw = screen_width();
+        self.next_flock -= dt;
+        if self.next_flock <= 0.0 {
+            self.next_flock = gen_range(10.0, 24.0);
+            let from_left = gen_range(0.0, 1.0) < 0.5;
+            let vx: f32 = gen_range(45.0, 75.0) * if from_left { 1.0 } else { -1.0 };
+            let (x0, h0) = (
+                if from_left { -40.0 } else { sw + 40.0 },
+                gen_range(180.0, 330.0),
+            );
+            for i in 0..gen_range(3, 7) {
+                let rank = ((i + 1) / 2) as f32;
+                let side = if i % 2 == 0 { 1.0 } else { -1.0 };
+                self.birds.push(Bird {
+                    x: x0 - vx.signum() * rank * 22.0,
+                    height: h0 + side * rank * 12.0,
+                    vx: vx * gen_range(0.95, 1.05),
+                    phase: gen_range(0.0, TAU),
+                    size: gen_range(0.8, 1.2),
+                });
+            }
+        }
+        for b in &mut self.birds {
+            b.x += b.vx * dt;
+        }
+        self.birds.retain(|b| b.x > -120.0 && b.x < sw + 120.0);
     }
 
     fn react(&mut self, e: &Event, game: &Game) {
@@ -419,7 +460,7 @@ impl Renderer {
         self.view = cam - vec2(sw / 2.0, sh / 2.0) + shake;
 
         clear_background(Color::new(0.02, 0.02, 0.04, 1.0));
-        self.draw_sky(art, sw);
+        self.draw_sky(sw);
         self.draw_tiles(game, art, sw, sh);
         self.draw_shop(art);
         self.draw_stashes(game, art);
@@ -448,39 +489,180 @@ impl Renderer {
         self.draw_toasts(sw);
     }
 
-    fn draw_sky(&self, art: &Art, sw: f32) {
+    fn draw_sky(&self, sw: f32) {
         if self.view.y >= 0.0 {
             return;
         }
-        let top = self.screen(0.0, -9.0).y;
         let ground = self.screen(0.0, 0.0).y;
-        draw_rectangle(
-            0.0,
-            0.0,
-            sw,
-            ground.max(0.0),
-            Color::new(0.45, 0.7, 0.95, 1.0),
-        );
-        let Some(sky) = art.get("sky") else {
+        if ground <= 0.0 {
             return;
-        };
-        let h = ground - top;
-        let w = h * sky.width() / sky.height();
-        // Half-speed parallax so the hills drift behind the shop.
-        let start = -((self.view.x * 0.5) % w + w) % w;
-        let mut x = start;
-        while x < sw {
+        }
+        // Soft vertical gradient: clear blue overhead, warm haze at the horizon.
+        let top = Color::new(0.33, 0.58, 0.9, 1.0);
+        let haze = Color::new(0.93, 0.9, 0.82, 1.0);
+        let bands = 32;
+        let span = ground.max(1.0);
+        for i in 0..bands {
+            let y = span * i as f32 / bands as f32;
+            let k = (i as f32 / bands as f32).powf(1.6);
+            draw_rectangle(0.0, y, sw, span / bands as f32 + 1.0, mix(top, haze, k));
+        }
+        let sun = vec2(sw * 0.78 - self.view.x * 0.01, ground - 300.0);
+        for (r, a) in [(260.0, 0.18), (130.0, 0.35), (60.0, 0.7)] {
             draw_texture_ex(
-                sky,
-                x,
-                top,
-                WHITE,
+                &self.glow,
+                sun.x - r,
+                sun.y - r,
+                Color::new(1.0, 0.95, 0.8, a),
                 DrawTextureParams {
-                    dest_size: Some(vec2(w + 1.0, h)),
+                    dest_size: Some(vec2(2.0 * r, 2.0 * r)),
                     ..Default::default()
                 },
             );
-            x += w;
+        }
+        draw_circle(sun.x, sun.y, 26.0, Color::new(1.0, 0.98, 0.9, 0.95));
+
+        self.draw_clouds(sw, ground, 0.04, 5.0, 0.9, 7, 11);
+        // Far to near: each ridge moves a little more with the camera than the last.
+        self.draw_ridge(
+            sw,
+            ground,
+            0.08,
+            230.0,
+            Color::new(0.62, 0.72, 0.86, 1.0),
+            1,
+            false,
+        );
+        self.draw_clouds(sw, ground, 0.12, 11.0, 0.6, 5, 12);
+        self.draw_ridge(
+            sw,
+            ground,
+            0.22,
+            150.0,
+            Color::new(0.5, 0.7, 0.66, 1.0),
+            2,
+            false,
+        );
+        self.draw_ridge(
+            sw,
+            ground,
+            0.45,
+            85.0,
+            Color::new(0.43, 0.66, 0.38, 1.0),
+            3,
+            true,
+        );
+        self.draw_birds(ground);
+    }
+
+    /// A rolling ridge line made of a few slow sine waves, drawn as thin columns.
+    #[allow(clippy::too_many_arguments)] // Private layer helper; the args are the layer.
+    fn draw_ridge(
+        &self,
+        sw: f32,
+        ground: f32,
+        parallax: f32,
+        height: f32,
+        color: Color,
+        seed: u64,
+        trees: bool,
+    ) {
+        let s = seed as f32;
+        let ridge = |u: f32| {
+            height
+                * (0.62
+                    + 0.22 * (u * 0.0021 + s).sin()
+                    + 0.12 * (u * 0.0057 + 2.0 * s).sin()
+                    + 0.05 * (u * 0.013 + 3.0 * s).sin())
+        };
+        let step = 4.0;
+        let offset = self.view.x * parallax;
+        let mut x = 0.0;
+        while x < sw {
+            let h = ridge(x + offset);
+            draw_rectangle(x, ground - h, step + 0.5, h, color);
+            // A lighter rim where the light catches the crest.
+            draw_rectangle(x, ground - h, step + 0.5, 2.0, mix(color, WHITE, 0.25));
+            x += step;
+        }
+        if !trees {
+            return;
+        }
+        // Round tree tops dotted along the nearest ridge.
+        let dark = mix(color, Color::new(0.1, 0.25, 0.15, 1.0), 0.55);
+        let spacing = 38.0;
+        let first = (offset / spacing).floor() as i32;
+        for i in first..first + (sw / spacing) as i32 + 2 {
+            let u = i as f32 * spacing;
+            let n = world::unit(world::hash(seed, i, 0, 21));
+            if n < 0.45 {
+                continue;
+            }
+            let x = u - offset + n * 12.0;
+            let base = ground - ridge(u) + 8.0;
+            let r = 9.0 + 9.0 * n;
+            draw_circle(x, base - r * 0.6, r, dark);
+            draw_circle(
+                x - r * 0.3,
+                base - r * 0.9,
+                r * 0.55,
+                mix(dark, WHITE, 0.15),
+            );
+        }
+    }
+
+    /// A layer of fat, flat-bottomed cumulus clouds drifting with the wind.
+    #[allow(clippy::too_many_arguments)] // Private layer helper; the args are the layer.
+    fn draw_clouds(
+        &self,
+        sw: f32,
+        ground: f32,
+        parallax: f32,
+        wind: f32,
+        scale: f32,
+        count: i32,
+        seed: u64,
+    ) {
+        let margin = 260.0 * scale;
+        let span = sw + 2.0 * margin;
+        let shade = Color::new(0.84, 0.85, 0.95, 0.95);
+        let white = Color::new(1.0, 1.0, 0.99, 0.97);
+        for i in 0..count {
+            let h1 = world::unit(world::hash(seed, i, 1, 31));
+            let h2 = world::unit(world::hash(seed, i, 2, 31));
+            let r = (38.0 + 34.0 * h2) * scale;
+            let travel = h1 * span - self.t * wind - self.view.x * parallax;
+            let x = travel.rem_euclid(span) - margin;
+            let y = ground - (170.0 + 230.0 * h2) * (0.6 + scale * 0.5);
+            let puffs = [
+                (-1.25, 0.15, 0.6),
+                (-0.6, -0.15, 0.82),
+                (0.0, -0.38, 1.0),
+                (0.65, -0.12, 0.78),
+                (1.2, 0.15, 0.55),
+            ];
+            draw_ellipse(x, y + 0.22 * r, 1.9 * r, 0.42 * r, 0.0, shade);
+            for (dx, dy, k) in puffs {
+                draw_circle(x + dx * r, y + dy * r + 0.12 * r, k * r, shade);
+            }
+            for (dx, dy, k) in puffs {
+                draw_circle(x + dx * r, y + dy * r, k * r * 0.92, white);
+            }
+        }
+    }
+
+    fn draw_birds(&self, ground: f32) {
+        let ink = Color::new(0.18, 0.2, 0.28, 0.85);
+        for b in &self.birds {
+            let flap = (self.t * 9.0 + b.phase).sin();
+            let (x, y) = (
+                b.x,
+                ground - b.height + (self.t * 1.3 + b.phase).sin() * 3.0,
+            );
+            let span = 7.0 * b.size;
+            let lift = flap * 4.0 * b.size;
+            draw_line(x - span, y - lift, x, y, 1.6, ink);
+            draw_line(x, y, x + span, y - lift, 1.6, ink);
         }
     }
 
