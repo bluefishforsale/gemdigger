@@ -6,6 +6,7 @@
 
 mod art;
 mod audio;
+mod capture;
 mod game;
 mod menu;
 mod monsters;
@@ -37,6 +38,22 @@ fn main() {
         let _ = std::io::Write::write_all(&mut std::io::stdout(), line.as_bytes());
         return;
     }
+    if let Some(dir) = capture_dir() {
+        let conf = Conf {
+            window_title: "GemDigger capture".to_string(),
+            window_width: 1280,
+            window_height: 720,
+            // NOTE: 1x framebuffer, so frames are 1280x720 on Retina screens too.
+            high_dpi: false,
+            ..Default::default()
+        };
+        macroquad::Window::from_config(conf, async move {
+            if let Err(e) = capture::run(&dir).await {
+                eprintln!("{e:#}");
+            }
+        });
+        return;
+    }
     let save_path = save::default_path();
     let settings_path = save_path.as_deref().map(settings::path_beside);
     let settings = settings_path
@@ -52,6 +69,13 @@ fn main() {
         ..Default::default()
     };
     macroquad::Window::from_config(conf, run(save_path, settings_path, settings));
+}
+
+/// `--capture <dir>`: render the README media instead of playing.
+fn capture_dir() -> Option<PathBuf> {
+    let args: Vec<String> = std::env::args().collect();
+    let i = args.iter().position(|a| a == "--capture")?;
+    args.get(i + 1).map(PathBuf::from)
 }
 
 fn new_seed() -> u64 {

@@ -1,23 +1,48 @@
 name: release
 
+# A v* tag builds Windows and macOS, signs both (Authenticode through Azure
+# Artifact Signing, Developer ID plus notarization through Apple), and only then
+# publishes. Every job that touches a signing secret runs in the `release`
+# environment, which only v* tags can deploy to, so pull requests never see them.
+
 on:
   push:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    environment: release
     steps:
       - uses: actions/checkout@v5
       # NOTE: a mismatch would ship builds whose --version disagrees with their release tag.
-      - run: |
+      - name: tag matches Cargo.toml
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-          test "v$version" = "${{ github.ref_name }}" || { echo "tag ${{ github.ref_name }} doesn't match Cargo.toml version $version"; exit 1; }
+          test "v$version" = "$TAG" || { echo "tag $TAG doesn't match Cargo.toml version $version"; exit 1; }
+      - name: every signing input is present
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          AZURE_CERT_PROFILE: ${{ vars.AZURE_CERT_PROFILE }}
+        run: scripts/check-release-secrets.sh
 
-  windows:
+  windows-build:
     needs: check
     runs-on: windows-latest
     steps:
@@ -32,10 +57,62 @@ jobs:
           Copy-Item "target\release\$name.exe" dist\
       - uses: actions/upload-artifact@v4
         with:
-          name: windows
+          name: windows-unsigned
           path: dist/*
+          if-no-files-found: error
 
-  macos:
+  windows-sign:
+    needs: windows-build
+    runs-on: windows-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      # NOTE: the artifact lands outside the workspace and only the one expected
+      # exe is copied out to sign, so a poisoned build can't replace the repo
+      # script that runs after Azure login.
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-unsigned
+          path: ${{ runner.temp }}/artifact
+      - name: artifact is exactly the one exe
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'artifact'
+          $items = @(Get-ChildItem -Path $root -Recurse -Force)
+          if ($items.Count -ne 1 -or $items[0].Name -ne 'gemdigger.exe' -or $items[0].PSIsContainer -or $items[0].LinkType) {
+            throw "unexpected artifact contents: $($items.FullName -join ', ')"
+          }
+          $sign = New-Item -ItemType Directory (Join-Path $env:RUNNER_TEMP 'sign')
+          Copy-Item $items[0].FullName $sign
+      # NOTE: the CI identity's only role is Certificate Profile Signer on the
+      # signing account, not the subscription, so login must not require one.
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - uses: Azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_CERT_PROFILE }}
+          files-folder: ${{ runner.temp }}\sign
+          files-folder-filter: exe
+          exclude-environment-credential: true
+      - run: ./scripts/verify-authenticode.ps1 -Folder "$env:RUNNER_TEMP\sign"
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: ${{ runner.temp }}/sign/gemdigger.exe
+          if-no-files-found: error
+
+  # Built and checked without secrets; only the signing job below sees them,
+  # and it never runs a build step or the built binary.
+  macos-build:
     needs: check
     runs-on: macos-latest
     env:
@@ -55,29 +132,103 @@ jobs:
           lipo -create -output "$app/Contents/MacOS/$name" \
             "target/aarch64-apple-darwin/release/$name" "target/x86_64-apple-darwin/release/$name"
           sed "s/VERSION/$version/g" packaging/Info.plist > "$app/Contents/Info.plist"
-          # Ad-hoc signature: unsigned arm64 code won't launch at all; this isn't a Developer ID.
-          codesign --force --deep --sign - "$app"
           test "$("$app/Contents/MacOS/$name" --version)" = "$name $version"
           lipo -archs "$app/Contents/MacOS/$name"
-          (cd dist && ditto -c -k --keepParent GemDigger.app "$name-macos.zip" && rm -rf GemDigger.app)
+          # Zipped with ditto so the bundle's metadata survives the artifact round trip.
+          (cd dist && ditto -c -k --keepParent GemDigger.app unsigned.zip && rm -rf GemDigger.app)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-unsigned
+          path: dist/unsigned.zip
+          if-no-files-found: error
+
+  macos-sign:
+    needs: macos-build
+    runs-on: macos-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v5
+      # NOTE: the keychain is set up from trusted repo scripts *before* the build
+      # artifact arrives, and the artifact is unpacked outside the workspace, so a
+      # poisoned build can't overwrite a script that later runs beside the key.
+      - name: signing keychain and notarization key
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: scripts/macos-signing-setup.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-unsigned
+          path: ${{ runner.temp }}/artifact
+      - name: unpack and check the unsigned app
+        run: |
+          zip="$RUNNER_TEMP/artifact/unsigned.zip"
+          out="$RUNNER_TEMP/unsigned"
+          # Refuse traversal before anything is written.
+          if zipinfo -1 "$zip" | grep -E '(^/|(^|/)\.\.(/|$))'; then
+            echo "::error::artifact has absolute or .. paths"; exit 1
+          fi
+          mkdir "$out"
+          ditto -x -k "$zip" "$out"
+          if [ -n "$(find "$out" -type l)" ]; then
+            echo "::error::artifact contains symlinks"; exit 1
+          fi
+          files=$(cd "$out" && find . -type f | sort)
+          expected=$(printf '%s\n' ./GemDigger.app/Contents/Info.plist ./GemDigger.app/Contents/MacOS/gemdigger)
+          if [ "$files" != "$expected" ]; then
+            echo "::error::unexpected files in artifact:"; echo "$files"; exit 1
+          fi
+      - name: sign, notarize and staple
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          app="$RUNNER_TEMP/unsigned/GemDigger.app"
+          # Notarization requires the hardened runtime and a secure timestamp.
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --wait
+          # Stapling fails unless Apple accepted it, so a rejected build stops here.
+          xcrun stapler staple "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          xcrun stapler validate "$app"
+          spctl --assess --type execute --verbose=2 "$app"
+          mkdir -p "$RUNNER_TEMP/signed"
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/signed/gemdigger-macos.zip"
+      - name: remove the signing keychain
+        if: always()
+        run: scripts/macos-signing-cleanup.sh
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: dist/*
+          path: ${{ runner.temp }}/signed/gemdigger-macos.zip
+          if-no-files-found: error
 
   publish:
-    needs: [windows, macos]
+    needs: [windows-sign, macos-sign]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
+          name: windows
           path: dist
-          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos
+          path: dist
       - run: |
           cd dist
-          sha256sum * > SHA256SUMS
+          sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
       - env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/* --verify-tag --generate-notes
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" dist/* --verify-tag --generate-notes
