@@ -20,8 +20,11 @@ jobs:
         shell: pwsh
         run: |
           $pkg = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0]
-          $line = & "target\release\$($pkg.name).exe" --version
-          if ($line -ne "$($pkg.name) $($pkg.version)") { throw "unexpected --version output: $line" }
+          # NOTE: a GUI-subsystem exe isn't waited on or captured by `& exe`; Start-Process with redirection does both.
+          $out = New-TemporaryFile
+          $p = Start-Process "target\release\$($pkg.name).exe" -ArgumentList "--version" -Wait -PassThru -NoNewWindow -RedirectStandardOutput $out
+          $line = (Get-Content $out -Raw).Trim()
+          if ($p.ExitCode -ne 0 -or $line -ne "$($pkg.name) $($pkg.version)") { throw "unexpected --version output (exit $($p.ExitCode)): $line" }
           $line
 
   scripts:

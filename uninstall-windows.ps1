@@ -3,7 +3,7 @@
 #   powershell -ExecutionPolicy Bypass -File uninstall-windows.ps1
 
 param(
-    [string]$Name = "windows-exe-template"
+    [string]$Name = "gemdigger"
 )
 
 $ErrorActionPreference = "Stop"

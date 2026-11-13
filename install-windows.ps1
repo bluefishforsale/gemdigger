@@ -6,8 +6,8 @@
 
 param(
     [string]$Version = "",
-    [string]$Repo = "bluefishforsale/windows-exe-template",
-    [string]$Name = "windows-exe-template"
+    [string]$Repo = "bluefishforsale/gemdigger",
+    [string]$Name = "gemdigger"
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,4 +56,8 @@ try {
     $key.Close()
 }
 
-& (Join-Path $installDir $exe) --version
+# The game is a GUI exe, so `& exe` wouldn't wait or show its output.
+$out = New-TemporaryFile
+Start-Process (Join-Path $installDir $exe) -ArgumentList "--version" -Wait -NoNewWindow -RedirectStandardOutput $out
+Write-Host "==> Installed $((Get-Content $out -Raw).Trim())"
+Remove-Item $out

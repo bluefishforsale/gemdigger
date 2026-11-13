@@ -1,55 +1,172 @@
-//! Placeholder binary so the template builds, tests, and releases end to end.
-//! Replace `run` with the real program; the plumbing around it is the template.
+//! GemDigger: dig down forever, sell gems, upgrade, and brave the dark.
+//! This file wires input, the rules, drawing, sound and auto-save together.
 
-use std::io::Write;
+// No console window behind the game on Windows.
+#![cfg_attr(not(test), windows_subsystem = "windows")]
 
-use anyhow::{Context, bail};
+mod art;
+mod audio;
+mod game;
+mod monsters;
+mod render;
+mod save;
+mod synth;
+mod world;
 
-fn main() -> anyhow::Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    run(&args, &mut std::io::stdout().lock())
+use std::path::{Path, PathBuf};
+
+use macroquad::prelude::*;
+
+use crate::game::{Event, Game, Input};
+use crate::render::Renderer;
+
+const AUTOSAVE_SECS: f32 = 30.0;
+
+fn main() {
+    // NOTE: CI and install-windows.ps1 run `--version` to check which build is installed.
+    if std::env::args()
+        .skip(1)
+        .any(|a| a == "--version" || a == "-V")
+    {
+        // A GUI-subsystem exe may have no stdout at all; never panic over it.
+        let line = format!("{} {}\n", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        let _ = std::io::Write::write_all(&mut std::io::stdout(), line.as_bytes());
+        return;
+    }
+    let conf = Conf {
+        window_title: "GemDigger".to_string(),
+        window_width: 1280,
+        window_height: 720,
+        high_dpi: true,
+        ..Default::default()
+    };
+    macroquad::Window::from_config(conf, run());
 }
 
-fn run(args: &[String], out: &mut impl Write) -> anyhow::Result<()> {
-    let name = env!("CARGO_PKG_NAME");
-    match args.first().map(String::as_str) {
-        None => writeln!(out, "Hello from {name}"),
-        // NOTE: CI and install-windows.ps1 read this line to confirm which build ran.
-        Some("--version" | "-V") => writeln!(out, "{name} {}", env!("CARGO_PKG_VERSION")),
-        Some(other) => bail!("unknown argument \"{other}\""),
-    }
-    .context("unable to write to stdout")
+fn new_seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(1, |d| d.as_nanos() as u64)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Loads the saved game, or starts a new one, plus a message for the player.
+fn load_game(path: Option<&Path>) -> (Game, Option<String>) {
+    let Some(path) = path else {
+        return (
+            Game::new(new_seed()),
+            Some("No save folder found; progress won't be saved.".into()),
+        );
+    };
+    match save::load(path) {
+        Ok(save::Loaded::Resumed(data)) => (Game::from_save(data), Some("Welcome back!".into())),
+        Ok(save::Loaded::Fresh) => (Game::new(new_seed()), None),
+        Ok(save::Loaded::Corrupt { backup }) => (
+            Game::new(new_seed()),
+            Some(format!(
+                "Old save was damaged; kept a copy at {}",
+                backup.display()
+            )),
+        ),
+        Err(e) => {
+            eprintln!("{e:#}");
+            (
+                Game::new(new_seed()),
+                Some("Couldn't read the save; starting fresh.".into()),
+            )
+        }
+    }
+}
 
-    fn output(args: &[&str]) -> anyhow::Result<String> {
-        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-        let mut out = Vec::new();
-        run(&args, &mut out)?;
-        Ok(String::from_utf8(out)?)
+fn store(path: Option<&PathBuf>, game: &Game, renderer: &mut Renderer) {
+    let Some(path) = path else {
+        return;
+    };
+    if let Err(e) = save::write(path, &game.to_save()) {
+        eprintln!("{e:#}");
+        renderer.toast("Couldn't save progress!");
+    }
+}
+
+fn read_input() -> Input {
+    let down = |keys: &[KeyCode]| keys.iter().any(|&k| is_key_down(k));
+    Input {
+        left: down(&[KeyCode::Left, KeyCode::A]),
+        right: down(&[KeyCode::Right, KeyCode::D]),
+        up: down(&[KeyCode::Up, KeyCode::W, KeyCode::Space]),
+        down: down(&[KeyCode::Down, KeyCode::S]),
+    }
+}
+
+fn shop_input(game: &mut Game) {
+    if !game.at_shop() {
+        return;
+    }
+    let click = is_mouse_button_pressed(MouseButton::Left).then(|| Vec2::from(mouse_position()));
+    for b in render::shop_buttons(game, screen_width()) {
+        if is_key_pressed(b.key) || click.is_some_and(|m| b.rect.contains(m)) {
+            game.apply(b.action);
+        }
+    }
+}
+
+async fn run() {
+    prevent_quit();
+    clear_background(BLACK);
+    draw_text("GemDigger is warming up...", 40.0, 80.0, 40.0, WHITE);
+    next_frame().await;
+
+    let dir = art::asset_dir();
+    let art = art::Art::load(dir.as_deref());
+    let sound = match audio::Audio::load(dir.as_deref()).await {
+        Ok(a) => Some(a),
+        Err(e) => {
+            eprintln!("{e:#}");
+            None
+        }
+    };
+    let save_path = save::default_path();
+    let (mut game, notice) = load_game(save_path.as_deref());
+    let mut renderer = Renderer::new();
+    if let Some(n) = notice {
+        renderer.toast(n);
+    }
+    if let Some(s) = &sound {
+        s.start();
     }
 
-    /// `--version` must report the Cargo.toml version, since release checks key off it.
-    #[test]
-    fn version_flag_reports_cargo_version() {
-        let out = output(&["--version"]).unwrap();
-        assert_eq!(
-            out.trim(),
-            format!("windows-exe-template {}", env!("CARGO_PKG_VERSION")),
-            "unexpected version line: {out:?}"
-        );
-    }
+    let mut since_save = 0.0;
+    loop {
+        // Clamped so a stall (window drag, sleep) can't tunnel the pod through rock.
+        let dt = get_frame_time().min(0.05);
+        shop_input(&mut game);
+        let events = game.update(dt, read_input());
 
-    /// An unknown argument is an error, not silently ignored.
-    #[test]
-    fn unknown_argument_is_rejected() {
-        let err = output(&["--bogus"]).unwrap_err();
-        assert!(
-            err.to_string().contains("--bogus"),
-            "error should name the argument: {err}"
-        );
+        since_save += dt;
+        let milestone = events.iter().any(|e| {
+            matches!(
+                e,
+                Event::Sold { .. }
+                    | Event::Bought(_)
+                    | Event::Died { .. }
+                    | Event::StashRecovered { .. }
+            )
+        });
+        if since_save >= AUTOSAVE_SECS || milestone {
+            store(save_path.as_ref(), &game, &mut renderer);
+            since_save = 0.0;
+        }
+
+        if let Some(s) = &sound {
+            s.update(&game);
+            s.react(&events);
+        }
+        renderer.update(dt, &game, &events);
+        renderer.draw(&game, &art);
+
+        if is_quit_requested() {
+            store(save_path.as_ref(), &game, &mut renderer);
+            break;
+        }
+        next_frame().await;
     }
 }
