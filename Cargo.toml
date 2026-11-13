@@ -1,0 +1,9 @@
+[package]
+name = "windows-exe-template"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+
+[dependencies]
+anyhow = "1"

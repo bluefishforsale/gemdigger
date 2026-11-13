@@ -1,0 +1,7 @@
+/target
+/dist
+.envrc
+.DS_Store
+# Machine-local Claude Code state (approvals, worktrees) never belongs in the repo.
+.claude/*
+!.claude/settings.json

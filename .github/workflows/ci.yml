@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    # On Windows, not Linux, so clippy and tests see the same cfg the shipped .exe does.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      - run: cargo fmt -- --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --locked --release
+      - name: smoke-run the release exe
+        shell: pwsh
+        run: |
+          $pkg = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0]
+          $line = & "target\release\$($pkg.name).exe" --version
+          if ($line -ne "$($pkg.name) $($pkg.version)") { throw "unexpected --version output: $line" }
+          $line
+
+  scripts:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - shell: pwsh
+        run: |
+          foreach ($script in Get-ChildItem *.ps1) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) { $errors; exit 1 }
+          }
+          $issues = Invoke-ScriptAnalyzer -Path . -Severity Warning,Error -ExcludeRule PSAvoidUsingWriteHost
+          if ($issues) { $issues | Format-Table -AutoSize; exit 1 }
+
+  hooks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: shellcheck .githooks/pre-commit

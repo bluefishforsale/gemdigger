@@ -1,0 +1,4 @@
+# NOTE: without crt-static the .exe links vcruntime140.dll dynamically and won't
+# start on a machine missing the Visual C++ redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

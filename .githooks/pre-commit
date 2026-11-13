@@ -1,0 +1,10 @@
+#!/bin/sh
+# Formatting never reaches review: rustfmt the staged Rust files and restage them.
+# Enable once per clone with: git config core.hooksPath .githooks
+set -e
+files=$(git diff --cached --name-only --diff-filter=ACM -- '*.rs')
+[ -n "$files" ] || exit 0
+# shellcheck disable=SC2086 # Word splitting is intended; repo paths have no spaces.
+rustfmt --edition 2024 $files
+# shellcheck disable=SC2086
+git add -- $files
