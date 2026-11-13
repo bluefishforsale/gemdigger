@@ -97,10 +97,11 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  macos:
+  # Built and checked without secrets; only the signing job below sees them,
+  # and it never runs a build step or the built binary.
+  macos-build:
     needs: check
     runs-on: macos-latest
-    environment: release
     env:
       MACOSX_DEPLOYMENT_TARGET: '11.0'
     steps:
@@ -109,19 +110,7 @@ jobs:
       - run: cargo test --locked
       - run: cargo build --locked --release --target aarch64-apple-darwin
       - run: cargo build --locked --release --target x86_64-apple-darwin
-      - name: signing keychain and notarization key
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-        run: scripts/macos-signing-setup.sh
-      - name: bundle, sign and notarize GemDigger.app
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      - name: bundle universal GemDigger.app
         run: |
           name=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].name')
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
@@ -130,6 +119,42 @@ jobs:
           lipo -create -output "$app/Contents/MacOS/$name" \
             "target/aarch64-apple-darwin/release/$name" "target/x86_64-apple-darwin/release/$name"
           sed "s/VERSION/$version/g" packaging/Info.plist > "$app/Contents/Info.plist"
+          test "$("$app/Contents/MacOS/$name" --version)" = "$name $version"
+          lipo -archs "$app/Contents/MacOS/$name"
+          # Zipped with ditto so the bundle's metadata survives the artifact round trip.
+          (cd dist && ditto -c -k --keepParent GemDigger.app unsigned.zip && rm -rf GemDigger.app)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-unsigned
+          path: dist/unsigned.zip
+          if-no-files-found: error
+
+  macos-sign:
+    needs: macos-build
+    runs-on: macos-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-unsigned
+          path: unsigned
+      - run: ditto -x -k unsigned/unsigned.zip dist
+      - name: signing keychain and notarization key
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: scripts/macos-signing-setup.sh
+      - name: sign, notarize and staple
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          app=dist/GemDigger.app
           # Notarization requires the hardened runtime and a secure timestamp.
           codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
           ditto -c -k --keepParent "$app" "$RUNNER_TEMP/notarize.zip"
@@ -140,20 +165,18 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app"
           xcrun stapler validate "$app"
           spctl --assess --type execute --verbose=2 "$app"
-          test "$("$app/Contents/MacOS/$name" --version)" = "$name $version"
-          lipo -archs "$app/Contents/MacOS/$name"
-          (cd dist && ditto -c -k --keepParent GemDigger.app "$name-macos.zip" && rm -rf GemDigger.app)
+          (cd dist && ditto -c -k --keepParent GemDigger.app gemdigger-macos.zip && rm -rf GemDigger.app)
       - name: remove the signing keychain
         if: always()
         run: scripts/macos-signing-cleanup.sh
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: dist/*
+          path: dist/gemdigger-macos.zip
           if-no-files-found: error
 
   publish:
-    needs: [windows-sign, macos]
+    needs: [windows-sign, macos-sign]
     runs-on: ubuntu-latest
     permissions:
       contents: write
