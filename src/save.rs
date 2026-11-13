@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 
-use crate::game::SaveData;
+use crate::game::{SaveData, SaveDataV1};
 
 /// `%APPDATA%\GemDigger\save.json` on Windows, the platform data dir elsewhere.
 /// `GEMDIGGER_SAVE` points it somewhere else, for testing without touching a real save.
@@ -36,7 +36,9 @@ pub fn load(path: &Path) -> anyhow::Result<Loaded> {
             return Err(e).with_context(|| format!("unable to read save \"{}\"", path.display()));
         }
     };
-    match serde_json::from_slice(&bytes) {
+    let parsed = serde_json::from_slice::<SaveData>(&bytes)
+        .or_else(|_| serde_json::from_slice::<SaveDataV1>(&bytes).map(SaveData::from));
+    match parsed {
         Ok(data) => Ok(Loaded::Resumed(data)),
         Err(_) => {
             let backup = path.with_extension("json.corrupt");
@@ -62,7 +64,7 @@ pub fn write(path: &Path, data: &impl serde::Serialize) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::Game;
+    use crate::game::{Game, Item};
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir =
@@ -96,6 +98,25 @@ mod tests {
             !path.with_extension("json.tmp").exists(),
             "temp file left behind"
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Saves from before typed cargo (gem tiers as plain numbers) still load.
+    #[test]
+    fn first_format_saves_still_load() {
+        let dir = temp_dir("v1");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("save.json");
+        let v1 = r#"{"version":1,"seed":5,"money":40,"levels":{"drill":1,"tank":0,"cargo":0,"hull":0,"lamp":0},
+            "x":6.5,"y":-0.4,"fuel":30.0,"hull":50.0,"cargo":[0,2],
+            "stashes":[{"x":3.5,"y":90.5,"cargo":[4]}],"changes":[[5,3,"Air"]],"deaths":2,"max_depth":95.0}"#;
+        fs::write(&path, v1).unwrap();
+        let Loaded::Resumed(data) = load(&path).unwrap() else {
+            panic!("v1 save did not load");
+        };
+        assert_eq!(data.cargo, vec![Item::Gem(0), Item::Gem(2)]);
+        assert_eq!(data.stashes[0].cargo, vec![Item::Gem(4)]);
+        assert_eq!((data.money, data.deaths), (40, 2));
         fs::remove_dir_all(dir).unwrap();
     }
 

@@ -825,6 +825,59 @@ pub fn sfx(name: &str) -> Vec<f32> {
                 );
             }
         }
+        "clink" => {
+            buf = silence(0.35);
+            add(
+                &mut buf,
+                0.0,
+                Note::new(1900.0, 0.2, 0.25, Wave::Square).env(0.001, 0.03),
+            );
+            add(
+                &mut buf,
+                0.0,
+                Note::new(2600.0, 0.3, 0.2, Wave::Sine).env(0.001, 0.08),
+            );
+            noise_burst(&mut buf, &mut rng, 0.0, 0.08, 0.3, 0.02, 0.6);
+        }
+        "craft" => {
+            buf = silence(1.0);
+            for (i, f) in [520.0, 780.0, 1040.0].iter().enumerate() {
+                add(
+                    &mut buf,
+                    i as f32 * 0.12,
+                    Note::new(*f, 0.2, 0.25, Wave::Square).env(0.001, 0.05),
+                );
+            }
+            for (i, n) in [72.0, 76.0, 79.0, 84.0, 88.0].iter().enumerate() {
+                add(
+                    &mut buf,
+                    0.4 + i as f32 * 0.05,
+                    Note::new(midi(*n), 0.5, 0.18, Wave::Sine).env(0.002, 0.2),
+                );
+            }
+        }
+        "fuse" => {
+            buf = silence(1.2);
+            noise_burst(&mut buf, &mut rng, 0.0, 1.2, 0.35, 0.8, 0.9);
+            add(
+                &mut buf,
+                0.0,
+                Note::new(1200.0, 0.1, 0.15, Wave::Square).env(0.001, 0.03),
+            );
+        }
+        "boom" => {
+            buf = silence(2.2);
+            noise_burst(&mut buf, &mut rng, 0.0, 2.0, 1.0, 0.45, 0.12);
+            noise_burst(&mut buf, &mut rng, 0.0, 0.15, 0.8, 0.04, 0.7);
+            add(
+                &mut buf,
+                0.0,
+                Note::new(90.0, 1.6, 0.9, Wave::Sine)
+                    .sweep(30.0)
+                    .env(0.002, 0.5),
+            );
+            lowpass(&mut buf, 0.35);
+        }
         "full" => {
             buf = silence(0.4);
             add(&mut buf, 0.0, Note::new(660.0, 0.12, 0.2, Wave::Tri));
@@ -891,7 +944,7 @@ pub fn sfx(name: &str) -> Vec<f32> {
 pub fn sfx_names() -> Vec<String> {
     let fixed = [
         "drill", "thrust", "dug", "sell", "buy", "deny", "low_fuel", "hit", "land", "death",
-        "respawn", "rumble", "stash", "full",
+        "respawn", "rumble", "stash", "full", "clink", "craft", "fuse", "boom",
     ];
     let mut names: Vec<String> = fixed.iter().map(|s| s.to_string()).collect();
     names.extend((0..6).map(|t| format!("pickup_{t}")));

@@ -105,6 +105,7 @@ fn read_input() -> Input {
         right: down(&[KeyCode::Right, KeyCode::D]),
         up: down(&[KeyCode::Up, KeyCode::W, KeyCode::Space]),
         down: down(&[KeyCode::Down, KeyCode::S]),
+        bomb: is_key_pressed(KeyCode::B),
     }
 }
 

@@ -10,7 +10,7 @@ use macroquad::audio::{
     PlaySoundParams, Sound, load_sound_from_bytes, play_sound, play_sound_once, set_sound_volume,
 };
 
-use crate::game::{Event, Game};
+use crate::game::{Event, Game, Item};
 use crate::monsters::Size;
 use crate::settings::Settings;
 use crate::synth;
@@ -145,7 +145,16 @@ impl Audio {
         for e in events {
             match e {
                 Event::Dug { .. } => self.play("dug", 0.5),
-                Event::Pickup { tier, .. } => self.play(&format!("pickup_{tier}"), 0.8),
+                Event::Pickup { item, .. } => match item {
+                    Item::Gem(t) => self.play(&format!("pickup_{t}"), 0.8),
+                    Item::Mineral(_) => self.play("clink", 0.7),
+                },
+                Event::Crafted => self.play("craft", 0.9),
+                Event::CantCraft => self.play("deny", 0.6),
+                Event::BombPlaced { .. } => self.play("fuse", 0.8),
+                Event::Exploded { .. } => self.play("boom", 1.0),
+                Event::MonsterKilled { size, .. } => self.play(&growl_name(*size), 0.6),
+                Event::MonsterStunned { .. } => self.play("growl_3", 0.8),
                 Event::CargoFull => self.play("full", 0.6),
                 Event::Landed { .. } => self.play("land", 0.6),
                 Event::Hurt { .. } => self.play("hit", 1.0),

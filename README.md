@@ -6,9 +6,11 @@ It's meant to be gentle. Lives are infinite: when the pod is lost (out of fuel, 
 
 ## Playing
 
-Arrow keys or WASD drive left and right and dig in the direction you push; up (or space) fires the thruster. You can dig sideways and down, but not up, so plan a way back. At the shop, click a row or press 1 to 8 to sell, refuel, repair, or upgrade.
+Arrow keys or WASD drive left and right and dig in the direction you push; up (or space) fires the thruster. You can dig sideways and down, but not up, so plan a way back. At the shop, click a row or press 1 to 0 to sell, refuel, repair, craft, or upgrade. ESC pauses and opens settings (music, sound effects, screen shake, full screen); F11 also toggles full screen, which shows more of the mine rather than blowing the art up.
 
 Monsters show up below about 60 m, and you always get a warning: the ground rumbles and the screen shakes for a couple of seconds before one breaks out of the rock. They only ever move side to side, so the escape is always the same, fly straight up. Small ones nibble the hull, bigger ones bite harder, and the biggest one, the Deep Thing, which only lives far down, takes the pod in one go.
+
+Bombs are the hard-won tool. Coal turns up from about 10 m, Sulfur from 90 m, and Potassium only from 180 m and rarely, and the shop crafts one of each into a bomb. They ride in their own pouch of three rather than the cargo hold, and B drops one (underground only). After a two-and-a-half-second fuse it clears the 3x3 around it, boulders included, scoops what gems and minerals it can into the hold, kills anything short of the Deep Thing (which it only stuns for a few seconds), and hurts the pod too if she hasn't backed off. "Sell gems" never sells minerals; a separate row sells spares for a few dollars.
 
 ## Installing on Windows
 
@@ -17,6 +19,10 @@ powershell -ExecutionPolicy Bypass -File install-windows.ps1
 ```
 
 That downloads the latest release through the [GitHub CLI](https://cli.github.com/) (the repo is private, so `winget install GitHub.cli` and `gh auth login` first), checks it against the release's `SHA256SUMS`, and installs it to `%LOCALAPPDATA%\Programs\gemdigger`, on your `PATH`. The save lives at `%APPDATA%\GemDigger\save.json`, and `uninstall-windows.ps1` removes the game but leaves the save alone.
+
+## Installing on macOS
+
+Each release also has `gemdigger-macos.zip`, a universal `GemDigger.app` for Apple Silicon and Intel Macs. It isn't signed with an Apple developer ID, so the first launch needs a right-click and Open (or System Settings, Privacy & Security, Open Anyway).
 
 ## How it's built
 

@@ -8,9 +8,10 @@ use macroquad::rand::gen_range;
 
 use crate::art::Art;
 use crate::game::{
-    Event, Game, MAX_LEVEL, ORE_NAMES, POD_HALF, SHOP_COLUMNS, ShopAction, Upgrade, ore_value,
+    BOMB_POUCH, Event, FUSE, Game, Item, MAX_LEVEL, POD_HALF, SHOP_COLUMNS, ShopAction, Upgrade,
 };
 use crate::monsters::{Monster, Phase, Size};
+use crate::world::Mineral;
 use crate::world::{self, Tile, WIDTH};
 
 /// Pixels per tile.
@@ -136,8 +137,53 @@ fn text_centered(s: &str, cx: f32, y: f32, size: f32, color: Color) {
 fn tile_color(tile: Tile, y: i32) -> Color {
     match tile {
         Tile::Ore(t) => ORE_COLORS[(t as usize).min(5)],
+        Tile::Mineral(m) => mineral_color(m),
         Tile::Boulder => Color::new(0.6, 0.6, 0.6, 1.0),
         _ => BAND_COLORS[world::band(y)],
+    }
+}
+
+fn mineral_color(m: Mineral) -> Color {
+    match m {
+        Mineral::Coal => Color::new(0.16, 0.15, 0.18, 1.0),
+        Mineral::Sulfur => Color::new(0.97, 0.86, 0.2, 1.0),
+        Mineral::Potassium => Color::new(0.93, 0.86, 0.96, 1.0),
+    }
+}
+
+/// Chunks of a mineral set into a dirt tile: coal lumps, sulfur crystals,
+/// pale potassium spars.
+fn draw_mineral(p: Vec2, m: Mineral, h: u64) {
+    let color = mineral_color(m);
+    let rim = mix(color, WHITE, 0.45);
+    let (sides, base) = match m {
+        Mineral::Coal => (5u8, 8.0),
+        Mineral::Sulfur => (6, 6.5),
+        Mineral::Potassium => (4, 7.0),
+    };
+    for i in 0..4u64 {
+        let bits = h >> (i * 12);
+        let ox = 10.0 + (bits & 0x1f) as f32 / 31.0 * (TILE - 20.0);
+        let oy = 10.0 + ((bits >> 5) & 0x1f) as f32 / 31.0 * (TILE - 20.0);
+        let r = base * (0.7 + ((bits >> 10) & 0x3) as f32 * 0.15);
+        let rot = (bits & 0xff) as f32;
+        draw_poly(
+            p.x + ox,
+            p.y + oy,
+            sides,
+            r + 1.5,
+            rot,
+            Color::new(0.0, 0.0, 0.0, 0.45),
+        );
+        draw_poly(p.x + ox, p.y + oy, sides, r, rot, color);
+        draw_circle(p.x + ox - r * 0.3, p.y + oy - r * 0.3, r * 0.25, rim);
+    }
+}
+
+fn item_color(item: Item) -> Color {
+    match item {
+        Item::Gem(t) => ORE_COLORS[(t as usize).min(5)],
+        Item::Mineral(m) => mineral_color(m),
     }
 }
 
@@ -341,14 +387,19 @@ impl Renderer {
                     false,
                 );
             }
-            Event::Pickup { tier, x, y } => {
-                let t = (*tier as usize).min(5);
-                self.burst(*x, *y, 18 + 4 * t, ORE_COLORS[t], 5.0, 0.0, true);
-                self.toast(format!(
-                    "+1 {}  ({})",
-                    ORE_NAMES[t],
-                    money(ore_value(*tier))
-                ));
+            Event::Pickup { item, x, y } => {
+                let extra = if let Item::Gem(t) = item {
+                    4 * (*t as usize).min(5)
+                } else {
+                    0
+                };
+                self.burst(*x, *y, 18 + extra, item_color(*item), 5.0, 0.0, true);
+                match item {
+                    Item::Gem(_) => {
+                        self.toast(format!("+1 {}  ({})", item.name(), money(item.value())))
+                    }
+                    Item::Mineral(_) => self.toast(format!("+1 {}  (for bombs)", item.name())),
+                }
             }
             Event::CargoFull => self.toast("Cargo hold is full! Fly up and sell at the shop."),
             Event::Landed { .. } => {
@@ -431,9 +482,48 @@ impl Renderer {
                 }
             }
             Event::StashRecovered { x, y, count } => {
-                self.toast(format!("Recovered {count} gems!"));
+                self.toast(format!("Recovered {count} lost items!"));
                 self.burst(*x, *y, 40, Color::new(0.8, 0.5, 1.0, 1.0), 6.0, 0.0, true);
             }
+            Event::Crafted => {
+                self.toast("Bomb crafted! Press B underground to drop one.");
+                self.burst(
+                    game.pod.x,
+                    game.pod.y - 0.5,
+                    30,
+                    Color::new(1.0, 0.6, 0.2, 1.0),
+                    4.0,
+                    0.0,
+                    true,
+                );
+            }
+            Event::CantCraft => {
+                if game.bombs >= BOMB_POUCH {
+                    self.toast("Bomb pouch is full");
+                } else {
+                    self.toast("A bomb needs 1 Coal, 1 Sulfur and 1 Potassium");
+                }
+            }
+            Event::BombPlaced { .. } => self.toast("Fuse lit! Get clear!"),
+            Event::Exploded { x, y } => {
+                self.flash = self.flash.max(0.35);
+                self.burst(*x, *y, 60, Color::new(1.0, 0.65, 0.2, 1.0), 9.0, 0.0, true);
+                self.burst(*x, *y, 30, Color::new(1.0, 0.95, 0.7, 1.0), 4.0, 0.0, true);
+                self.burst(
+                    *x,
+                    *y,
+                    40,
+                    tile_color(Tile::Dirt, *y as i32),
+                    7.0,
+                    14.0,
+                    false,
+                );
+            }
+            Event::MonsterKilled { x, y, .. } => {
+                self.toast("Got it!");
+                self.burst(*x, *y, 30, Color::new(0.6, 0.3, 0.8, 1.0), 6.0, 8.0, true);
+            }
+            Event::MonsterStunned { .. } => self.toast("The Deep Thing is stunned! Fly up!"),
         }
     }
 
@@ -464,6 +554,7 @@ impl Renderer {
         self.draw_tiles(game, art, sw, sh);
         self.draw_shop(art);
         self.draw_stashes(game, art);
+        self.draw_bombs(game);
         for m in &game.monsters {
             self.draw_monster(m, art);
         }
@@ -702,6 +793,7 @@ impl Renderer {
                     Tile::Dirt => format!("dirt_{band}_{variant}"),
                     Tile::Boulder => "boulder".to_string(),
                     Tile::Ore(t) => format!("ore_{t}"),
+                    Tile::Mineral(_) => format!("dirt_{band}_{variant}"),
                 };
                 if ty > 0 || tile != Tile::Dirt {
                     draw_rectangle(p.x, p.y, TILE, TILE, base);
@@ -725,6 +817,9 @@ impl Renderer {
                     None => {
                         draw_rectangle(p.x, p.y, TILE, TILE, tile_color(tile, ty));
                     }
+                }
+                if let Tile::Mineral(m) = tile {
+                    draw_mineral(p, m, world::hash(seed, tx, ty, 6));
                 }
             }
         }
@@ -764,6 +859,29 @@ impl Renderer {
             30.0,
             Color::new(0.35, 0.2, 0.1, 1.0),
         );
+    }
+
+    fn draw_bombs(&self, game: &Game) {
+        for b in &game.live_bombs {
+            let p = self.screen(b.x, b.y);
+            draw_circle(p.x, p.y, 11.0, Color::new(0.1, 0.1, 0.12, 1.0));
+            draw_circle(p.x - 3.5, p.y - 3.5, 3.5, Color::new(0.45, 0.45, 0.5, 1.0));
+            draw_rectangle(
+                p.x + 2.0,
+                p.y - 14.0,
+                5.0,
+                5.0,
+                Color::new(0.3, 0.3, 0.32, 1.0),
+            );
+            draw_line(
+                p.x + 4.5,
+                p.y - 14.0,
+                p.x + 7.0,
+                p.y - 19.0,
+                2.0,
+                Color::new(0.6, 0.5, 0.3, 1.0),
+            );
+        }
     }
 
     fn draw_stashes(&self, game: &Game, art: &Art) {
@@ -1056,6 +1174,24 @@ impl Renderer {
             }
         }
 
+        // The fuse spark blinks faster as it burns down.
+        for b in &game.live_bombs {
+            let p = self.screen(b.x, b.y);
+            let urgency = 1.0 - (b.fuse / FUSE).clamp(0.0, 1.0);
+            let blink = 0.5 + 0.5 * (self.t * (6.0 + 22.0 * urgency)).sin();
+            let r = 14.0 + 10.0 * blink;
+            draw_texture_ex(
+                &self.glow,
+                p.x + 7.0 - r,
+                p.y - 19.0 - r,
+                Color::new(1.0, 0.5 + 0.3 * blink, 0.2, 0.9),
+                DrawTextureParams {
+                    dest_size: Some(vec2(2.0 * r, 2.0 * r)),
+                    ..Default::default()
+                },
+            );
+        }
+
         for s in &game.stashes {
             let p = self.screen(s.x, s.y);
             let r = TILE * (1.4 + 0.3 * (self.t * 3.0).sin());
@@ -1135,7 +1271,7 @@ impl Renderer {
 
     fn draw_hud(&self, game: &Game, art: &Art, sw: f32, sh: f32) {
         let (x, y) = (14.0, 14.0);
-        draw_rectangle(x, y, 270.0, 176.0, PANEL);
+        draw_rectangle(x, y, 300.0, 242.0, PANEL);
         let icon = |name: &str, row: f32| {
             if let Some(tex) = art.get(name) {
                 draw_texture_ex(
@@ -1222,6 +1358,21 @@ impl Renderer {
             },
         );
 
+        text(
+            &format!("Bombs {}/{BOMB_POUCH}   (B to drop)", game.bombs),
+            x + 12.0,
+            row_y(5.0),
+            22.0,
+            Color::new(1.0, 0.7, 0.4, 1.0),
+        );
+        let mut mx = x + 12.0;
+        for m in Mineral::ALL {
+            let label = format!("{} {}", m.name(), game.count(Item::Mineral(m)));
+            draw_circle(mx + 6.0, row_y(6.0) - 7.0, 6.0, mineral_color(m));
+            text(&label, mx + 16.0, row_y(6.0), 20.0, WHITE);
+            mx += measure_text(&label, None, 20, 1.0).width + 30.0;
+        }
+
         if game.depth() < 1.0 && !game.at_shop() {
             text_centered(
                 "Arrow keys or WASD to drive and dig.  Up to fly.  Sell gems at the shop.",
@@ -1263,6 +1414,8 @@ pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
         KeyCode::Key6,
         KeyCode::Key7,
         KeyCode::Key8,
+        KeyCode::Key9,
+        KeyCode::Key0,
     ];
     let mut push = |action, label: String, detail: String, enabled: bool| {
         let key = keys[rows.len()];
@@ -1279,9 +1432,22 @@ pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
     let value = game.cargo_value();
     push(
         ShopAction::Sell,
-        "Sell cargo".into(),
+        "Sell gems".into(),
         format!("+{}", money(value)),
         value > 0,
+    );
+    let minerals = game.mineral_value();
+    push(
+        ShopAction::SellMinerals,
+        "Sell spare minerals".into(),
+        format!("+{}", money(minerals)),
+        minerals > 0,
+    );
+    push(
+        ShopAction::Craft,
+        format!("Craft bomb  ({}/{BOMB_POUCH})", game.bombs),
+        "C+S+P".into(),
+        game.can_craft(),
     );
     let fuel = game.refuel_cost();
     push(
@@ -1324,7 +1490,7 @@ fn draw_shop_panel(game: &Game, sw: f32) {
         PANEL,
     );
     text(
-        "SHOP  (click, or press 1-8)",
+        "SHOP  (click, or press 1-0)",
         first.rect.x,
         46.0,
         26.0,
