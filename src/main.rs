@@ -8,6 +8,7 @@ mod art;
 mod audio;
 mod capture;
 mod game;
+mod log;
 mod menu;
 mod monsters;
 mod render;
@@ -49,12 +50,13 @@ fn main() {
         };
         macroquad::Window::from_config(conf, async move {
             if let Err(e) = capture::run(&dir).await {
-                eprintln!("{e:#}");
+                log::line(&format!("{e:#}"));
             }
         });
         return;
     }
     let save_path = save::default_path();
+    log::init(save_path.as_deref());
     let settings_path = save_path.as_deref().map(settings::path_beside);
     let settings = settings_path
         .as_deref()
@@ -103,7 +105,7 @@ fn load_game(path: Option<&Path>) -> (Game, Option<String>) {
             )),
         ),
         Err(e) => {
-            eprintln!("{e:#}");
+            log::line(&format!("{e:#}"));
             (
                 Game::new(new_seed()),
                 Some("Couldn't read the save; starting fresh.".into()),
@@ -117,7 +119,7 @@ fn store(path: Option<&PathBuf>, game: &Game, renderer: &mut Renderer) {
         return;
     };
     if let Err(e) = save::write(path, &game.to_save()) {
-        eprintln!("{e:#}");
+        log::line(&format!("{e:#}"));
         renderer.toast("Couldn't save progress!");
     }
 }
@@ -151,12 +153,22 @@ async fn run(save_path: Option<PathBuf>, settings_path: Option<PathBuf>, mut set
     draw_text("GemDigger is warming up...", 40.0, 80.0, 40.0, WHITE);
     next_frame().await;
 
+    log::graphics();
+    log::line(&format!(
+        "screen {}x{} at dpi scale {}",
+        screen_width(),
+        screen_height(),
+        screen_dpi_scale()
+    ));
+    log::gl_errors("window setup");
     let dir = art::asset_dir();
     let art = art::Art::load(dir.as_deref());
+    log::line(&format!("sprites loaded: {}", art.count()));
+    log::gl_errors("loading sprites");
     let sound = match audio::Audio::load(dir.as_deref()).await {
         Ok(a) => Some(a),
         Err(e) => {
-            eprintln!("{e:#}");
+            log::line(&format!("{e:#}"));
             None
         }
     };
@@ -171,6 +183,7 @@ async fn run(save_path: Option<PathBuf>, settings_path: Option<PathBuf>, mut set
 
     let mut menu = Menu::new();
     let mut since_save = 0.0;
+    let mut frames = 0u32;
     loop {
         let choice = menu.input(&settings);
         let fullscreen_key = is_key_pressed(KeyCode::F11);
@@ -191,7 +204,7 @@ async fn run(save_path: Option<PathBuf>, settings_path: Option<PathBuf>, mut set
             if let Some(path) = &settings_path
                 && let Err(e) = save::write(path, &settings)
             {
-                eprintln!("{e:#}");
+                log::line(&format!("{e:#}"));
             }
         }
 
@@ -234,8 +247,13 @@ async fn run(save_path: Option<PathBuf>, settings_path: Option<PathBuf>, mut set
 
         if is_quit_requested() {
             store(save_path.as_ref(), &game, &mut renderer);
+            log::line("quit cleanly");
             break;
         }
         next_frame().await;
+        frames += 1;
+        if frames == 1 || frames == 120 {
+            log::gl_errors(&format!("frame {frames}"));
+        }
     }
 }
