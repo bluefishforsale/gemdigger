@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use macroquad::miniquad::gl;
+use macroquad::miniquad::{Backend, gl};
 
 static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
@@ -41,6 +41,16 @@ pub fn line(msg: &str) {
     }
 }
 
+/// Whether this run draws through Metal, where there is no OpenGL to query.
+fn on_metal() -> bool {
+    // SAFETY: main thread, after the window exists; only reads backend info.
+    unsafe { macroquad::window::get_internal_gl() }
+        .quad_context
+        .info()
+        .backend
+        == Backend::Metal
+}
+
 fn gl_string(name: u32) -> String {
     // SAFETY: called on the main thread after the window (and its GL context)
     // exists; glGetString returns a static, NUL-terminated string or null.
@@ -69,6 +79,11 @@ pub fn graphics() {
         std::env::consts::OS,
         std::env::consts::ARCH
     ));
+    // NOTE: never call into OpenGL on Metal; there's no GL context to answer.
+    if on_metal() {
+        line("Graphics: Metal");
+        return;
+    }
     line(&format!("GL vendor:   {}", gl_string(GL_VENDOR)));
     line(&format!("GL renderer: {}", gl_string(GL_RENDERER)));
     line(&format!("GL version:  {}", gl_string(GL_VERSION)));
@@ -80,6 +95,9 @@ pub fn graphics() {
 
 /// Logs any pending OpenGL error, tagged with what just happened.
 pub fn gl_errors(after: &str) {
+    if on_metal() {
+        return;
+    }
     for _ in 0..8 {
         // SAFETY: main thread, live context; glGetError has no preconditions.
         let e = unsafe { gl::glGetError() };
