@@ -84,6 +84,10 @@ impl Art {
         Art { textures }
     }
 
+    pub fn count(&self) -> usize {
+        self.textures.len()
+    }
+
     pub fn get(&self, name: &str) -> Option<&Texture2D> {
         self.textures.get(name)
     }
