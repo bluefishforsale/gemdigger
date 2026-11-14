@@ -12,6 +12,8 @@ pub const POD_HALF: f32 = 0.4;
 pub const SPAWN: (f32, f32) = (48.0, -POD_HALF);
 /// The columns the shop covers on the surface.
 pub const SHOP_COLUMNS: (f32, f32) = (45.0, 51.0);
+/// Rows of ground under the shop that stay solid no matter what.
+const FOUNDATION_DEPTH: i32 = 2;
 pub const MAX_LEVEL: u8 = 5;
 pub const ORE_NAMES: [&str; 6] = ["Copper", "Silver", "Gold", "Emerald", "Ruby", "Starcrystal"];
 const ORE_VALUES: [u64; 6] = [10, 25, 60, 150, 400, 1000];
@@ -34,6 +36,13 @@ const MOVE_SPEED: f32 = 5.0;
 const SAFE_LANDING: f32 = 11.0;
 const TOP: f32 = -6.0;
 const EPS: f32 = 0.001;
+
+/// Whether a tile holds up the shop. Neither drill nor bomb can break these,
+/// so the shop never ends up floating over a hole.
+pub fn is_foundation(tx: i32, ty: i32) -> bool {
+    (0..FOUNDATION_DEPTH).contains(&ty)
+        && (SHOP_COLUMNS.0 as i32..SHOP_COLUMNS.1 as i32).contains(&tx)
+}
 
 pub fn ore_value(tier: u8) -> u64 {
     ORE_VALUES.get(tier as usize).copied().unwrap_or(0)
@@ -581,7 +590,7 @@ impl Game {
 
     fn try_dig(&mut self, tx: i32, ty: i32, to: (f32, f32)) -> bool {
         let tile = self.world.get(tx, ty);
-        if !tile.is_diggable() {
+        if !tile.is_diggable() || is_foundation(tx, ty) {
             return false;
         }
         self.pod.dig = Some(Dig {
@@ -673,7 +682,7 @@ impl Game {
         for ty in cy - 1..=cy + 1 {
             for tx in cx - 1..=cx + 1 {
                 let tile = self.world.get(tx, ty);
-                if matches!(tile, Tile::Air | Tile::Wall) || ty < 0 {
+                if matches!(tile, Tile::Air | Tile::Wall) || ty < 0 || is_foundation(tx, ty) {
                     continue;
                 }
                 self.world.set(tx, ty, Tile::Air);
@@ -1020,8 +1029,30 @@ impl Game {
         game.stashes = s.stashes;
         game.deaths = s.deaths;
         game.max_depth = s.max_depth;
+        game.repair_foundation();
         game.free_pod();
         game
+    }
+
+    /// Puts back any foundation an older save dug out, and lifts the pod out
+    /// to the shop if it was parked in that hole.
+    fn repair_foundation(&mut self) {
+        let mut pod_inside = false;
+        for ty in 0..FOUNDATION_DEPTH {
+            for tx in SHOP_COLUMNS.0 as i32..SHOP_COLUMNS.1 as i32 {
+                if self.world.get(tx, ty) != Tile::Air {
+                    continue;
+                }
+                self.world.set(tx, ty, Tile::Dirt);
+                let (cx, cy) = (tx as f32 + 0.5, ty as f32 + 0.5);
+                pod_inside |= (self.pod.x - cx).abs() < 0.5 + POD_HALF
+                    && (self.pod.y - cy).abs() < 0.5 + POD_HALF;
+            }
+        }
+        if pod_inside {
+            self.pod.x = SPAWN.0;
+            self.pod.y = SPAWN.1;
+        }
     }
 
     /// Clears rock (never walls) from under the pod, for saves made against a
@@ -1178,6 +1209,7 @@ mod tests {
     fn holding_down_digs_deeper() {
         let mut g = Game::new(5);
         g.monster_timer = f32::INFINITY;
+        g.pod.x = 40.5; // beside the shop; the ground under it is off limits
         run(&mut g, 4.0, down());
         assert!(g.depth() > 3.0, "pod only reached {}", g.depth());
     }
@@ -1563,6 +1595,84 @@ mod tests {
             "stash not fully recovered"
         );
         assert!(g.stashes.is_empty());
+    }
+
+    /// The shop stands on ground the drill can't touch.
+    #[test]
+    fn digging_under_the_shop_is_refused() {
+        let mut g = Game::new(5);
+        g.monster_timer = f32::INFINITY;
+        run(&mut g, 2.0, down());
+        assert!(g.depth() < 0.5, "dug under the shop to {} m", g.depth());
+        assert_eq!(g.world.get(48, 0), Tile::Dirt);
+    }
+
+    /// Tunnelling in sideways from next to the shop is refused too.
+    #[test]
+    fn tunnelling_into_the_foundation_is_refused() {
+        let mut g = Game::new(5);
+        g.monster_timer = f32::INFINITY;
+        for x in 40..45 {
+            g.world.set(x, 0, Tile::Air);
+        }
+        g.pod.x = 44.5;
+        g.pod.y = 1.0 - POD_HALF - EPS;
+        run(
+            &mut g,
+            2.0,
+            Input {
+                right: true,
+                ..Input::default()
+            },
+        );
+        assert_eq!(
+            g.world.get(45, 0),
+            Tile::Dirt,
+            "foundation tunnelled from the side"
+        );
+        assert!(g.pod.x < 45.0, "pod got under the shop: x={}", g.pod.x);
+    }
+
+    /// A bomb next to the foundation clears around it but leaves it whole.
+    #[test]
+    fn blast_spares_the_shop_foundation() {
+        let mut g = Game::new(5);
+        g.world.set(48, 2, Tile::Air);
+        g.pod.y = 30.0;
+        g.live_bombs.push(Bomb {
+            x: 48.5,
+            y: 2.5,
+            vy: 0.0,
+            fuse: 0.01,
+        });
+        g.update(DT, Input::default());
+        for x in 47..=49 {
+            assert_eq!(
+                g.world.get(x, 1),
+                Tile::Dirt,
+                "foundation at ({x},1) blasted"
+            );
+            assert_eq!(g.world.get(x, 3), Tile::Air, "({x},3) under it not cleared");
+        }
+    }
+
+    /// A save made before the rule, with the foundation already dug out,
+    /// loads with the ground back under the shop and the pod out from under it.
+    #[test]
+    fn loading_repairs_a_dug_out_foundation() {
+        let mut data = Game::new(5).to_save();
+        data.changes = (45..51).map(|x| (x, 0, Tile::Air)).collect();
+        data.x = 48.5;
+        data.y = 1.0 - POD_HALF - EPS;
+        let g = Game::from_save(data);
+        for x in 45..51 {
+            assert_eq!(
+                g.world.get(x, 0),
+                Tile::Dirt,
+                "foundation at ({x},0) still dug"
+            );
+        }
+        assert_eq!((g.pod.x, g.pod.y), SPAWN, "pod left under the shop");
     }
 
     /// Saving mid-dig must not put the pod inside rock on reload.
