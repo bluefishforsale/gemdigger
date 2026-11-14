@@ -19,6 +19,7 @@ mod world;
 
 use std::path::{Path, PathBuf};
 
+use macroquad::miniquad::conf::{AppleGfxApi, Platform};
 use macroquad::prelude::*;
 
 use crate::game::{Event, Game, Input};
@@ -46,6 +47,8 @@ fn main() {
             window_height: 720,
             // NOTE: 1x framebuffer, so frames are 1280x720 on Retina screens too.
             high_dpi: false,
+            // NOTE: stays on OpenGL; reading frames back (get_screen_data) is
+            // unimplemented on Metal and panics.
             ..Default::default()
         };
         macroquad::Window::from_config(conf, async move {
@@ -68,9 +71,18 @@ fn main() {
         window_height: 720,
         high_dpi: true,
         fullscreen: settings.fullscreen,
+        platform: metal(),
         ..Default::default()
     };
     macroquad::Window::from_config(conf, run(save_path, settings_path, settings));
+}
+
+/// Metal on Apple; other platforms ignore this and stay on OpenGL.
+fn metal() -> Platform {
+    Platform {
+        apple_gfx_api: AppleGfxApi::Metal,
+        ..Default::default()
+    }
 }
 
 /// `--capture <dir>`: render the README media instead of playing.
@@ -254,6 +266,14 @@ async fn run(save_path: Option<PathBuf>, settings_path: Option<PathBuf>, mut set
         frames += 1;
         if frames == 1 || frames == 120 {
             log::gl_errors(&format!("frame {frames}"));
+        }
+        if frames == 120 {
+            log::line(&format!(
+                "screen at frame 120: {}x{} at dpi scale {}",
+                screen_width(),
+                screen_height(),
+                screen_dpi_scale()
+            ));
         }
     }
 }
