@@ -181,7 +181,7 @@ jobs:
           if [ "$files" != "$expected" ]; then
             echo "::error::unexpected files in artifact:"; echo "$files"; exit 1
           fi
-      - name: sign, notarize and staple
+      - name: sign, notarize and staple the app
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
@@ -198,15 +198,35 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app"
           xcrun stapler validate "$app"
           spctl --assess --type execute --verbose=2 "$app"
+      - name: build, sign, notarize and staple the DMG
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          # The window that opens shows the app beside an Applications shortcut: drag to install.
+          stage="$RUNNER_TEMP/dmg"
+          mkdir "$stage"
+          ditto "$RUNNER_TEMP/unsigned/GemDigger.app" "$stage/GemDigger.app"
+          ln -s /Applications "$stage/Applications"
           mkdir -p "$RUNNER_TEMP/signed"
-          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/signed/gemdigger-macos.zip"
+          dmg="$RUNNER_TEMP/signed/gemdigger-macos.dmg"
+          hdiutil create -volname GemDigger -srcfolder "$stage" -fs HFS+ -format UDZO -ov "$dmg"
+          # The app inside already carries its own ticket; the DMG gets one too so
+          # Gatekeeper is satisfied offline whichever one it checks.
+          codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$dmg"
+          xcrun notarytool submit "$dmg" \
+            --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --wait
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+          spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
       - name: remove the signing keychain
         if: always()
         run: scripts/macos-signing-cleanup.sh
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: ${{ runner.temp }}/signed/gemdigger-macos.zip
+          path: ${{ runner.temp }}/signed/gemdigger-macos.dmg
           if-no-files-found: error
 
   publish:
