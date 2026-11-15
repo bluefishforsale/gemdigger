@@ -17,7 +17,7 @@ A cozy-to-creepy digging game. Drill down, collect gems, sell them at the shop, 
 Download from the [latest release](https://github.com/bluefishforsale/gemdigger/releases/latest). No account needed.
 
 - **Windows:** download `gemdigger.exe` and run it. To install it on your PATH instead, run `install-windows.ps1` from PowerShell; it checks the download against the release's `SHA256SUMS`.
-- **macOS:** download `gemdigger-macos.zip`, unzip it, and drag `GemDigger.app` into Applications.
+- **macOS:** download `gemdigger-macos.dmg`, open it, and drag GemDigger into the Applications folder beside it.
 
 Releases are code-signed: the Windows exe with an Authenticode signature, and the Mac app with a Developer ID, notarized by Apple. (v0.1.0 came before signing, so Windows warns about it.)
 
