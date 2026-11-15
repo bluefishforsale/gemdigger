@@ -6,6 +6,7 @@
 
 mod art;
 mod audio;
+mod bench;
 mod capture;
 mod game;
 mod log;
@@ -40,6 +41,24 @@ fn main() {
         let _ = std::io::Write::write_all(&mut std::io::stdout(), line.as_bytes());
         return;
     }
+    if std::env::args().any(|a| a == "--bench") {
+        let conf = Conf {
+            window_title: "GemDigger bench".to_string(),
+            window_width: 1280,
+            window_height: 720,
+            high_dpi: true,
+            fullscreen: true,
+            // GEMDIGGER_METAL=1 benches miniquad's Metal backend instead, for comparison.
+            platform: if std::env::var_os("GEMDIGGER_METAL").is_some() {
+                metal()
+            } else {
+                Platform::default()
+            },
+            ..Default::default()
+        };
+        macroquad::Window::from_config(conf, bench::run());
+        return;
+    }
     if let Some(dir) = capture_dir() {
         let conf = Conf {
             window_title: "GemDigger capture".to_string(),
@@ -71,13 +90,14 @@ fn main() {
         window_height: 720,
         high_dpi: true,
         fullscreen: settings.fullscreen,
-        platform: metal(),
+        // NOTE: OpenGL on macOS too. miniquad 0.4's Metal backend measured about
+        // 12x slower full screen at 5K (4-6 fps against 53-67), see --bench.
         ..Default::default()
     };
     macroquad::Window::from_config(conf, run(save_path, settings_path, settings));
 }
 
-/// Metal on Apple; other platforms ignore this and stay on OpenGL.
+/// Metal on Apple; other platforms ignore this. Only the benchmark opts in.
 fn metal() -> Platform {
     Platform {
         apple_gfx_api: AppleGfxApi::Metal,
