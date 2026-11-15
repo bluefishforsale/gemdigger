@@ -836,6 +836,7 @@ impl Renderer {
         let x1 = ((self.view.x + sw) / TILE).ceil() as i32 + 1;
         let y1 = ((self.view.y + sh) / TILE).ceil() as i32 + 1;
         let seed = game.world.seed;
+        let mut minerals = Vec::new();
         for ty in y0..=y1 {
             for tx in x0..=x1 {
                 let tile = game.world.get(tx, ty);
@@ -848,12 +849,12 @@ impl Renderer {
                 let variant = world::hash(seed, tx, ty, 5) % 3;
                 let sprite = match tile {
                     Tile::Air => {
-                        draw_rectangle(p.x, p.y, TILE, TILE, mix(base, BLACK, 0.72));
+                        art.rect(p.x, p.y, TILE, TILE, mix(base, BLACK, 0.72));
                         continue;
                     }
                     Tile::Wall => {
-                        draw_rectangle(p.x, p.y, TILE, TILE, Color::new(0.09, 0.08, 0.11, 1.0));
-                        draw_rectangle(
+                        art.rect(p.x, p.y, TILE, TILE, Color::new(0.09, 0.08, 0.11, 1.0));
+                        art.rect(
                             p.x + 4.0,
                             p.y + 4.0,
                             TILE - 8.0,
@@ -869,32 +870,26 @@ impl Renderer {
                     Tile::Mineral(_) => format!("dirt_{band}_{variant}"),
                 };
                 if ty > 0 || tile != Tile::Dirt {
-                    draw_rectangle(p.x, p.y, TILE, TILE, base);
+                    art.rect(p.x, p.y, TILE, TILE, base);
                 }
                 match art.get(&sprite) {
-                    Some(tex) => {
+                    Some(sprite) => {
                         // Slight overlap hides the ragged painted edges between tiles.
                         let pad = TILE * 0.06;
-                        let dest = vec2(TILE + 2.0 * pad, TILE + 2.0 * pad);
-                        draw_texture_ex(
-                            tex,
-                            p.x - pad,
-                            p.y - pad,
-                            WHITE,
-                            DrawTextureParams {
-                                dest_size: Some(dest),
-                                ..Default::default()
-                            },
-                        );
+                        let size = TILE + 2.0 * pad;
+                        sprite.draw(p.x - pad, p.y - pad, size, size, WHITE);
                     }
-                    None => {
-                        draw_rectangle(p.x, p.y, TILE, TILE, tile_color(tile, ty));
-                    }
+                    None => art.rect(p.x, p.y, TILE, TILE, tile_color(tile, ty)),
                 }
                 if let Tile::Mineral(m) = tile {
-                    draw_mineral(p, m, world::hash(seed, tx, ty, 6));
+                    minerals.push((p, m, world::hash(seed, tx, ty, 6)));
                 }
             }
+        }
+        // Mineral chunks are plain shapes on a different texture, so they go in
+        // their own pass rather than breaking the tile batch at every mineral.
+        for (p, m, h) in minerals {
+            draw_mineral(p, m, h);
         }
     }
 
@@ -912,19 +907,10 @@ impl Renderer {
             text_centered("SHOP", left.x + w / 2.0, left.y - 1.5 * TILE, 32.0, WHITE);
             return;
         };
-        let h = w * tex.height() / tex.width();
+        let h = w * tex.size().y / tex.size().x;
         // The painted grass island under the shop sits on the surface row.
         let top = left.y - h * 0.9;
-        draw_texture_ex(
-            tex,
-            left.x,
-            top,
-            WHITE,
-            DrawTextureParams {
-                dest_size: Some(vec2(w, h)),
-                ..Default::default()
-            },
-        );
+        tex.draw(left.x, top, w, h, WHITE);
         text_centered(
             "SHOP",
             left.x + w * 0.349,
@@ -963,16 +949,7 @@ impl Renderer {
             let p = self.screen(s.x, s.y) + vec2(0.0, bob);
             let size = TILE * 0.9;
             match art.get("stash") {
-                Some(tex) => draw_texture_ex(
-                    tex,
-                    p.x - size / 2.0,
-                    p.y - size / 2.0,
-                    WHITE,
-                    DrawTextureParams {
-                        dest_size: Some(vec2(size, size)),
-                        ..Default::default()
-                    },
-                ),
+                Some(tex) => tex.draw(p.x - size / 2.0, p.y - size / 2.0, size, size, WHITE),
                 None => draw_rectangle(
                     p.x - size / 2.0,
                     p.y - size / 2.0,
@@ -1016,16 +993,14 @@ impl Renderer {
         };
         let dest = vec2(w * TILE * 1.15, h * TILE * 1.15);
         match art.get(&format!("{}_{frame}", monster_sprite(m.size))) {
-            Some(tex) => draw_texture_ex(
-                tex,
+            Some(tex) => tex.draw_ex(
                 p.x - dest.x / 2.0,
                 p.y - dest.y / 2.0 + bob,
+                dest.x,
+                dest.y,
                 tint,
-                DrawTextureParams {
-                    dest_size: Some(dest),
-                    flip_x: m.dir < 0.0,
-                    ..Default::default()
-                },
+                m.dir < 0.0,
+                0.0,
             ),
             None => draw_ellipse(
                 p.x,
@@ -1066,7 +1041,7 @@ impl Renderer {
             );
             return;
         };
-        let h = w * tex.height() / tex.width();
+        let h = w * tex.size().y / tex.size().x;
         let rotation = if digging_down {
             FRAC_PI_2 * pod.facing
         } else {
@@ -1078,17 +1053,14 @@ impl Renderer {
         } else {
             p.y + POD_HALF * TILE - h
         };
-        draw_texture_ex(
-            tex,
+        tex.draw_ex(
             p.x - w / 2.0 + jitter.x,
             y + jitter.y,
+            w,
+            h,
             WHITE,
-            DrawTextureParams {
-                dest_size: Some(vec2(w, h)),
-                rotation,
-                flip_x: pod.facing < 0.0,
-                ..Default::default()
-            },
+            pod.facing < 0.0,
+            rotation,
         );
     }
 
@@ -1359,16 +1331,7 @@ impl Renderer {
         draw_rectangle(x, y, width, 254.0, PANEL);
         let icon = |name: &str, row: f32| {
             if let Some(tex) = art.get(name) {
-                draw_texture_ex(
-                    tex,
-                    x + 10.0,
-                    y + 8.0 + row * 33.0,
-                    WHITE,
-                    DrawTextureParams {
-                        dest_size: Some(vec2(28.0, 28.0)),
-                        ..Default::default()
-                    },
-                );
+                tex.draw(x + 10.0, y + 8.0 + row * 33.0, 28.0, 28.0, WHITE);
             }
         };
         let tx = x + 48.0;
