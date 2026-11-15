@@ -6,9 +6,19 @@ Why this file exists: the README is for players and stays short. Build, release 
 
 `cargo fmt -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`. CI runs all three on Windows and macOS. `main` is protected: changes land by PR, and the `build`, `macos`, `scripts` and `hooks` checks must pass.
 
-## Every release that changes gameplay
+## Versioning
 
-Before tagging:
+Versions are `x.y.z`, set in `Cargo.toml` and tagged `vx.y.z`.
+
+- **x, major:** bumping it means the y series has landed on all of its core principles. It's stable, every planned feature has landed, and its known bugs are fixed. A major bump requires a written roadmap and spec first.
+- **y, gameplay:** a significant gameplay change within the current x paradigm, such as new mechanics, items, monsters or zones. Reset z to 0.
+- **z, fixes:** bug fixes for the current y release. Also use z for changes that don't alter gameplay, such as packaging, signing, platform or graphics-backend work.
+
+When a change does both, the larger bump wins. While x is 0, the game is still finding its core principles.
+
+## Every y release
+
+A y release changes gameplay, so before tagging:
 
 1. Update the README's Features list to match what the game now does.
 2. Re-capture the screenshots and clip, then copy them into `media/`:
