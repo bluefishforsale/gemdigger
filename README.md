@@ -51,7 +51,7 @@ Losing the pod isn't the end: you start again at your nearest base, or the surfa
 
 - An endless mine that goes down forever, with rarer gems the deeper you dig
 - Five depth zones, from sunny topsoil to a dark abyss, each with its own music
-- The light shrinks as you descend, and gems twinkle in the dark
+- Daylight stops at the mouth of the shaft, and the light shrinks as you descend
 - Six kinds of monsters with health bars, from void spiders to the Shadow Leviathan and the Deep One
 - A laser, rockets and a charge-up ion cannon, bought at the shop
 - Rare relics dropped by monsters, permanent bonuses past the max upgrade
@@ -60,6 +60,9 @@ Losing the pod isn't the end: you start again at your nearest base, or the surfa
 - A radar mini-map with a sonar ping for ore, and an arrow to the nearest shop
 - Teleport home by sacrificing your cargo
 - Lost cargo waits where you fell, with an arrow pointing back to it
+- Nothing is ever destroyed: gems that don't fit in a full hold stay glinting where you dug them
+- The fuel bar turns red and flashes faster as you near the point of no return
+- Run dry on the surface with no money and you're quietly towed back to the shop
 - Upgrades for drill, fuel tank, cargo hold, hull and lamp
 - Craft bombs from Coal, Sulfur and Potassium to blast through boulders and monsters
 - A painted sky with mountains, drifting clouds, trees and birds

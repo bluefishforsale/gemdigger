@@ -142,7 +142,7 @@ impl Gun {
         match self {
             Gun::Laser => 800,
             Gun::Rockets => 2000,
-            Gun::Ion => 6000,
+            Gun::Ion => 12000,
         }
     }
 }
@@ -232,8 +232,12 @@ impl Upgrade {
     }
 
     /// Price to go from `level` to `level + 1`.
+    /// Price to go from `level` to `level + 1`. NOTE: the last two levels are
+    /// four times the curve, so maxing out takes about eight deep trips, not
+    /// two; levels 1-3 are unchanged so the early game feels the same.
     pub fn cost(self, level: u8) -> u64 {
-        (self.base_cost() * 2.4f64.powi(level as i32)).round() as u64
+        let steep = if level >= 3 { 4.0 } else { 1.0 };
+        (self.base_cost() * 2.4f64.powi(level as i32) * steep).round() as u64
     }
 }
 
@@ -285,6 +289,14 @@ impl Site {
 pub struct Base {
     pub x: f32,
     pub floor: i32,
+}
+
+/// Something the hold had no room for, left glinting where it was dug out.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Loose {
+    pub x: f32,
+    pub y: f32,
+    pub item: Item,
 }
 
 /// A rare, permanent bonus dropped by monsters killed with a heavy weapon.
@@ -497,7 +509,12 @@ pub enum Event {
         x: f32,
         y: f32,
     },
-    CargoFull,
+    /// The hold was full, so these were left where they lay.
+    LeftBehind(Vec<Item>),
+    /// B pressed when a bomb can't be dropped; says why.
+    CantBomb(&'static str),
+    /// Stranded on the surface with nothing to trade: quietly brought home.
+    Towed,
     Landed {
         speed: f32,
     },
@@ -621,6 +638,11 @@ pub struct Game {
     pub arsenal: Arsenal,
     pub rockets: Vec<Rocket>,
     pub drops: Vec<RelicDrop>,
+    pub loose: Vec<Loose>,
+    /// Refused this frame, announced together at the end of the update.
+    left_behind: Vec<Item>,
+    /// Seconds spent stranded on the surface.
+    stranded: f32,
     pub bases: Vec<Base>,
     pub base_kits: u8,
     /// Seconds left to press T a second time.
@@ -664,6 +686,9 @@ impl Game {
             arsenal: Arsenal::default(),
             rockets: Vec::new(),
             drops: Vec::new(),
+            loose: Vec::new(),
+            left_behind: Vec::new(),
+            stranded: 0.0,
             bases: Vec::new(),
             base_kits: 0,
             teleport_armed: 0.0,
@@ -887,6 +912,11 @@ impl Game {
         self.update_drops(dt);
         self.update_monsters(dt);
         self.recover_stashes();
+        self.pick_up_loose();
+        if !self.left_behind.is_empty() {
+            let items = std::mem::take(&mut self.left_behind);
+            self.events.push(Event::LeftBehind(items));
+        }
         self.check_fuel(dt);
         self.max_depth = self.max_depth.max(self.depth());
         std::mem::take(&mut self.events)
@@ -1062,7 +1092,13 @@ impl Game {
             return;
         };
         if self.cargo.len() >= self.levels.cargo_cap() {
-            self.events.push(Event::CargoFull);
+            // Nothing vanishes: it stays in the cleared tile to collect later.
+            self.loose.push(Loose {
+                x: tx as f32 + 0.5,
+                y: ty as f32 + 0.5,
+                item,
+            });
+            self.left_behind.push(item);
             return;
         }
         self.cargo.push(item);
@@ -1074,8 +1110,18 @@ impl Game {
     }
 
     fn drop_bomb(&mut self) {
+        if self.pod.dig.is_some() {
+            return;
+        }
+        if self.bombs == 0 {
+            self.events
+                .push(Event::CantBomb("No bombs: craft one at a shop"));
+            return;
+        }
         // Underground only: no blowing up the shop.
-        if self.bombs == 0 || self.pod.y < 1.0 || self.pod.dig.is_some() {
+        if self.pod.y < 1.0 {
+            self.events
+                .push(Event::CantBomb("Bombs only work underground"));
             return;
         }
         self.bombs -= 1;
@@ -1501,7 +1547,68 @@ impl Game {
         self.events.push(Event::Respawned);
     }
 
+    /// Fuel it would take to reach the nearest shop from here, with a little
+    /// margin: thrust burns 1 a second at 7 rows a second, driving 0.3 a
+    /// second at 5 columns a second.
+    pub fn return_fuel(&self) -> f32 {
+        let site = self.nearest_site(self.pod.x, self.pod.y);
+        let (sx, sy) = site.landing();
+        let climb = (self.pod.y - sy).max(0.0) / MAX_RISE;
+        // A shop below has to be dug down to: about a quarter unit a row.
+        let dig = (sy - self.pod.y).max(0.0) * 0.25;
+        let drive = (sx - self.pod.x).abs() / MOVE_SPEED * 0.3;
+        (climb + dig + drive) * 1.2 + 1.0
+    }
+
+    /// Out of fuel on the surface with no money and nothing to sell would be
+    /// stuck forever, so after a moment the pod is quietly brought to the
+    /// shop with a quarter tank. No message: the game just carries on.
+    fn tow_if_stranded(&mut self, dt: f32) {
+        let stranded = self.pod.y <= 1.0
+            && self.pod.fuel <= 0.0
+            && self.money == 0
+            && self.cargo_value() + self.mineral_value() == 0;
+        if !stranded {
+            self.stranded = 0.0;
+            return;
+        }
+        self.stranded += dt;
+        if self.stranded < 2.0 {
+            return;
+        }
+        self.stranded = 0.0;
+        self.pod.x = SPAWN.0;
+        self.pod.y = SPAWN.1;
+        self.pod.vx = 0.0;
+        self.pod.vy = 0.0;
+        self.pod.fuel = 0.25 * self.levels.fuel_max();
+        self.events.push(Event::Towed);
+    }
+
+    fn pick_up_loose(&mut self) {
+        let cap = self.levels.cargo_cap();
+        let (px, py) = (self.pod.x, self.pod.y);
+        let mut got = Vec::new();
+        self.loose.retain(|l| {
+            let close = (l.x - px).hypot(l.y - py) < 0.9;
+            if close && self.cargo.len() + got.len() < cap {
+                got.push(*l);
+                return false;
+            }
+            true
+        });
+        for l in got {
+            self.cargo.push(l.item);
+            self.events.push(Event::Pickup {
+                item: l.item,
+                x: l.x,
+                y: l.y,
+            });
+        }
+    }
+
     fn check_fuel(&mut self, dt: f32) {
+        self.tow_if_stranded(dt);
         let underground = self.pod.y > 1.0;
         if self.pod.fuel <= 0.0 && underground {
             self.die("Ran out of fuel".into());
@@ -1672,6 +1779,7 @@ impl Game {
             bombs: self.bombs,
             arsenal: self.arsenal,
             bases: self.bases.clone(),
+            loose: self.loose.clone(),
             base_kits: self.base_kits,
             stashes: self.stashes.clone(),
             changes: self.world.changes(),
@@ -1693,6 +1801,7 @@ impl Game {
         game.bombs = s.bombs.min(BOMB_POUCH);
         game.arsenal = s.arsenal;
         game.bases = s.bases;
+        game.loose = s.loose;
         game.base_kits = s.base_kits.min(MAX_BASE_KITS);
         game.stashes = s.stashes;
         game.deaths = s.deaths;
@@ -1762,6 +1871,8 @@ pub struct SaveData {
     pub bases: Vec<Base>,
     #[serde(default)]
     pub base_kits: u8,
+    #[serde(default)]
+    pub loose: Vec<Loose>,
     pub stashes: Vec<Stash>,
     pub changes: Vec<(i32, i32, Tile)>,
     pub deaths: u32,
@@ -1802,6 +1913,7 @@ impl From<SaveDataV1> for SaveData {
         let gems = |tiers: Vec<u8>| tiers.into_iter().map(Item::Gem).collect();
         SaveData {
             arsenal: Arsenal::default(),
+            loose: Vec::new(),
             bases: Vec::new(),
             base_kits: 0,
             version: SaveData::VERSION,
@@ -2689,6 +2801,164 @@ mod tests {
             g.update(DT, tap).contains(&Event::Pinged),
             "ping never recharged"
         );
+    }
+
+    /// A full hold never destroys what the drill digs out: it stays in the
+    /// tile, and comes aboard once there's room.
+    #[test]
+    fn full_hold_leaves_items_in_the_world() {
+        let mut g = game_at_depth(80);
+        g.monster_timer = f32::INFINITY;
+        let (tx, ty) = (6, 81);
+        g.world.set(tx, ty, Tile::Ore(2));
+        g.cargo = vec![Item::Gem(0); g.levels.cargo_cap()];
+        let events = run(&mut g, 2.0, down());
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::LeftBehind(v) if v == &vec![Item::Gem(2)]))
+        );
+        assert_eq!(g.loose.len(), 1, "the gem vanished instead of staying put");
+        g.cargo.clear();
+        g.pod.dig = None;
+        let (lx, ly) = (g.loose[0].x, g.loose[0].y);
+        g.pod.x = lx;
+        g.pod.y = ly;
+        g.update(DT, Input::default());
+        assert_eq!(
+            g.cargo,
+            vec![Item::Gem(2)],
+            "left-behind gem wasn't picked up"
+        );
+        assert!(g.loose.is_empty());
+    }
+
+    /// A blast that uncovers several things with a full hold says so once.
+    #[test]
+    fn one_left_behind_message_per_blast() {
+        let mut g = game_at_depth(200);
+        g.pod.y = 150.0;
+        g.cargo = vec![Item::Gem(0); g.levels.cargo_cap()];
+        for x in 19..=21 {
+            g.world.set(x, 200, Tile::Ore(1));
+        }
+        g.explode(20.5, 200.5, Weapon::Rocket);
+        let events = g.update(DT, Input::default());
+        let notes: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, Event::LeftBehind(_)))
+            .collect();
+        assert_eq!(
+            notes.len(),
+            1,
+            "expected one combined message, got {notes:?}"
+        );
+        assert!(matches!(notes[0], Event::LeftBehind(v) if v.len() == 3));
+    }
+
+    /// Pressing B when a bomb can't go says why instead of doing nothing.
+    #[test]
+    fn bomb_refusals_say_why() {
+        let mut g = game_at_depth(80);
+        let tap = Input {
+            bomb: true,
+            ..Input::default()
+        };
+        assert!(
+            g.update(DT, tap)
+                .iter()
+                .any(|e| matches!(e, Event::CantBomb(_))),
+            "empty pouch was silent"
+        );
+        let mut g = Game::new(1);
+        g.bombs = 1;
+        assert!(
+            g.update(DT, tap)
+                .iter()
+                .any(|e| matches!(e, Event::CantBomb(_))),
+            "surface bomb was silent"
+        );
+        assert_eq!(g.bombs, 1);
+    }
+
+    /// Out of fuel on the surface with nothing to trade is no longer a dead
+    /// end: after a moment she's quietly brought to the shop with fuel.
+    #[test]
+    fn stranded_on_the_surface_is_towed_home() {
+        let mut g = Game::new(1);
+        g.pod.x = SHOP_COLUMNS.0 - 40.0;
+        g.pod.fuel = 0.0;
+        let events = run(&mut g, 2.5, Input::default());
+        assert!(events.contains(&Event::Towed), "never towed");
+        assert!(
+            (g.pod.x - SPAWN.0).abs() < 0.01 && (g.pod.y - SPAWN.1).abs() < 0.05,
+            "not at the shop: {:?}",
+            (g.pod.x, g.pod.y)
+        );
+        assert!(g.pod.fuel > 0.0);
+        // Anyone with money or cargo can still help themselves; no tow.
+        let mut g = Game::new(1);
+        g.pod.x = SHOP_COLUMNS.0 - 40.0;
+        g.pod.fuel = 0.0;
+        g.money = 5;
+        assert!(!run(&mut g, 3.0, Input::default()).contains(&Event::Towed));
+    }
+
+    /// The last two upgrade levels are steep, so the tree takes many deep
+    /// trips instead of two; the first three are untouched.
+    #[test]
+    fn top_upgrade_levels_are_steep() {
+        let tree: u64 = Upgrade::ALL
+            .iter()
+            .map(|&u| (0..MAX_LEVEL).map(|l| u.cost(l)).sum::<u64>())
+            .sum();
+        assert_eq!(tree, 102_528);
+        assert_eq!(Upgrade::Drill.cost(0), 120);
+        assert_eq!(Upgrade::Drill.cost(2), 691);
+    }
+
+    /// The way home costs more fuel the deeper she is.
+    #[test]
+    fn return_fuel_grows_with_depth() {
+        // Beside the shop, above the first outpost, so home is straight up.
+        let at = |depth| {
+            let mut g = game_at_depth(depth);
+            g.pod.x = SPAWN.0 - 8.0;
+            g.return_fuel()
+        };
+        let (shallow, deep) = (at(20), at(100));
+        assert!(
+            deep > shallow,
+            "return cost didn't grow: {shallow} -> {deep}"
+        );
+    }
+
+    /// A full starter tank near home is nowhere near the point of no return,
+    /// so the fuel bar stays calm.
+    #[test]
+    fn fuel_warning_is_quiet_near_home() {
+        let margin = |depth| {
+            let mut g = game_at_depth(depth);
+            g.pod.x = SPAWN.0 - 8.0;
+            g.pod.fuel = g.levels.fuel_max();
+            g.pod.fuel / g.return_fuel()
+        };
+        assert!(margin(40) > 2.0, "warned at 40 m: {}", margin(40));
+    }
+
+    /// Left-behind items survive a save round trip.
+    #[test]
+    fn saves_keep_left_behind_items() {
+        let mut g = game_at_depth(80);
+        g.loose.push(Loose {
+            x: 3.5,
+            y: 81.5,
+            item: Item::Gem(4),
+        });
+        let back = Game::from_save(
+            serde_json::from_str(&serde_json::to_string(&g.to_save()).unwrap()).unwrap(),
+        );
+        assert_eq!(back.loose, g.loose);
     }
 
     /// Saving mid-dig must not put the pod inside rock on reload.

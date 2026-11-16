@@ -109,7 +109,14 @@ impl Audio {
 
     /// Sets loop volumes from the pod's state; call every frame.
     pub fn update(&self, game: &Game, settings: &Settings) {
-        let pos = world::band_position(game.depth());
+        // NOTE: below the shaft mouth the mix jumps a third of the way to the
+        // next track, so the sound changes the moment she goes underground.
+        let depth = game.depth();
+        let pos = if depth < 0.6 {
+            0.0
+        } else {
+            world::band_position(depth).max(0.35)
+        };
         let music = if settings.music { MUSIC_VOLUME } else { 0.0 };
         for (i, track) in self.music.iter().enumerate() {
             let w = (1.0 - (pos - i as f32).abs()).max(0.0);
@@ -181,7 +188,9 @@ impl Audio {
                 Event::Exploded { .. } => self.play("boom", 1.0),
                 Event::MonsterKilled { size, .. } => self.play(&growl_name(*size), 0.6),
                 Event::MonsterStunned { .. } => self.play("growl_3", 0.8),
-                Event::CargoFull => self.play("full", 0.6),
+                Event::LeftBehind(_) => self.play("full", 0.6),
+                Event::CantBomb(_) => self.play("deny", 0.6),
+                Event::Towed => {}
                 Event::Landed { .. } => self.play("land", 0.6),
                 Event::Hurt { .. } => self.play("hit", 1.0),
                 Event::Died { .. } => self.play("death", 1.0),

@@ -316,6 +316,9 @@ async fn run(save_path: Option<PathBuf>, settings_path: Option<PathBuf>, mut set
             game.update(dt, read_input())
         };
 
+        if events.contains(&Event::Towed) {
+            log::line("stranded on the surface with nothing to trade; towed to the shop");
+        }
         since_save += dt;
         let milestone = events.iter().any(|e| {
             matches!(
