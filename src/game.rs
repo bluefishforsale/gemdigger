@@ -9,9 +9,9 @@ use crate::world::{self, Mineral, Tile, WIDTH, World};
 /// Half the pod's width and height, in tiles.
 pub const POD_HALF: f32 = 0.4;
 /// Where the pod appears after dying: standing on the surface by the shop.
-pub const SPAWN: (f32, f32) = (48.0, -POD_HALF);
+pub const SPAWN: (f32, f32) = (256.0, -POD_HALF);
 /// The columns the shop covers on the surface.
-pub const SHOP_COLUMNS: (f32, f32) = (45.0, 51.0);
+pub const SHOP_COLUMNS: (f32, f32) = (253.0, 259.0);
 /// Rows of ground under the shop that stay solid no matter what.
 const FOUNDATION_DEPTH: i32 = 2;
 pub const MAX_LEVEL: u8 = 5;
@@ -1209,7 +1209,7 @@ mod tests {
     fn holding_down_digs_deeper() {
         let mut g = Game::new(5);
         g.monster_timer = f32::INFINITY;
-        g.pod.x = 40.5; // beside the shop; the ground under it is off limits
+        g.pod.x = SHOP_COLUMNS.0 - 7.5; // beside the shop; the ground under it is off limits
         run(&mut g, 4.0, down());
         assert!(g.depth() > 3.0, "pod only reached {}", g.depth());
     }
@@ -1604,7 +1604,7 @@ mod tests {
         g.monster_timer = f32::INFINITY;
         run(&mut g, 2.0, down());
         assert!(g.depth() < 0.5, "dug under the shop to {} m", g.depth());
-        assert_eq!(g.world.get(48, 0), Tile::Dirt);
+        assert_eq!(g.world.get(SPAWN.0 as i32, 0), Tile::Dirt);
     }
 
     /// Tunnelling in sideways from next to the shop is refused too.
@@ -1612,10 +1612,11 @@ mod tests {
     fn tunnelling_into_the_foundation_is_refused() {
         let mut g = Game::new(5);
         g.monster_timer = f32::INFINITY;
-        for x in 40..45 {
+        let s0 = SHOP_COLUMNS.0 as i32;
+        for x in s0 - 5..s0 {
             g.world.set(x, 0, Tile::Air);
         }
-        g.pod.x = 44.5;
+        g.pod.x = SHOP_COLUMNS.0 - 0.5;
         g.pod.y = 1.0 - POD_HALF - EPS;
         run(
             &mut g,
@@ -1626,27 +1627,32 @@ mod tests {
             },
         );
         assert_eq!(
-            g.world.get(45, 0),
+            g.world.get(s0, 0),
             Tile::Dirt,
             "foundation tunnelled from the side"
         );
-        assert!(g.pod.x < 45.0, "pod got under the shop: x={}", g.pod.x);
+        assert!(
+            g.pod.x < SHOP_COLUMNS.0,
+            "pod got under the shop: x={}",
+            g.pod.x
+        );
     }
 
     /// A bomb next to the foundation clears around it but leaves it whole.
     #[test]
     fn blast_spares_the_shop_foundation() {
         let mut g = Game::new(5);
-        g.world.set(48, 2, Tile::Air);
+        let m = SPAWN.0 as i32;
+        g.world.set(m, 2, Tile::Air);
         g.pod.y = 30.0;
         g.live_bombs.push(Bomb {
-            x: 48.5,
+            x: m as f32 + 0.5,
             y: 2.5,
             vy: 0.0,
             fuse: 0.01,
         });
         g.update(DT, Input::default());
-        for x in 47..=49 {
+        for x in m - 1..=m + 1 {
             assert_eq!(
                 g.world.get(x, 1),
                 Tile::Dirt,
@@ -1661,11 +1667,12 @@ mod tests {
     #[test]
     fn loading_repairs_a_dug_out_foundation() {
         let mut data = Game::new(5).to_save();
-        data.changes = (45..51).map(|x| (x, 0, Tile::Air)).collect();
-        data.x = 48.5;
+        let (s0, s1) = (SHOP_COLUMNS.0 as i32, SHOP_COLUMNS.1 as i32);
+        data.changes = (s0..s1).map(|x| (x, 0, Tile::Air)).collect();
+        data.x = SPAWN.0 + 0.5;
         data.y = 1.0 - POD_HALF - EPS;
         let g = Game::from_save(data);
-        for x in 45..51 {
+        for x in s0..s1 {
             assert_eq!(
                 g.world.get(x, 0),
                 Tile::Dirt,
