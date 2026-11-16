@@ -1026,7 +1026,7 @@ impl Renderer {
         if game.at_shop() {
             draw_shop_panel(game, sw);
         }
-        self.draw_toasts(sw);
+        self.draw_toasts(sw, sh, game.at_shop());
     }
 
     fn draw_sky(&self, art: &Art, sw: f32) {
@@ -2281,17 +2281,32 @@ impl Renderer {
         }
     }
 
-    fn draw_toasts(&self, sw: f32) {
+    /// Messages along the top, or, while a shop menu fills the top right,
+    /// along the bottom (clear of the radar) so they never print over it.
+    fn draw_toasts(&self, sw: f32, sh: f32, shop_open: bool) {
+        let (cx, top) = if shop_open {
+            (
+                (sw - 240.0) / 2.0,
+                sh - 40.0 - self.toasts.len() as f32 * 34.0,
+            )
+        } else {
+            (sw / 2.0, 60.0)
+        };
         for (i, t) in self.toasts.iter().enumerate() {
             let a = (1.0 - (t.age - 2.5).max(0.0)).clamp(0.0, 1.0);
             let rise = (t.age * 6.0).min(6.0);
-            text_centered(
-                &t.text,
-                sw / 2.0,
-                60.0 + i as f32 * 34.0 - rise,
-                28.0,
-                with_alpha(WHITE, a),
-            );
+            let y = top + i as f32 * 34.0 - rise;
+            if shop_open {
+                let w = measure_text(&t.text, None, 28, 1.0).width;
+                draw_rectangle(
+                    cx - w / 2.0 - 10.0,
+                    y - 24.0,
+                    w + 20.0,
+                    32.0,
+                    with_alpha(PANEL, a),
+                );
+            }
+            text_centered(&t.text, cx, y, 28.0, with_alpha(WHITE, a));
         }
     }
 }
