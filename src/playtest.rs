@@ -15,13 +15,15 @@ use macroquad::prelude::*;
 
 use crate::art::Art;
 use crate::game::{Event, Game, Gun, Input, Item, SHOP_COLUMNS, ShopAction, SiteKind, Upgrade};
+use crate::menu::{Choice, Menu};
 use crate::monsters::{Kind, Monster, Phase, Size, Weapon};
 use crate::render::Renderer;
+use crate::settings::Settings;
 use crate::world::Tile;
 
 const DT: f32 = 1.0 / 60.0;
 
-const STEPS: [(&str, f32); 15] = [
+const STEPS: [(&str, f32); 18] = [
     ("buy laser, rockets, ion cannon, base kit and upgrades", 2.0),
     ("drive off the shop", 5.0),
     ("dig down to 70 m", 150.0),
@@ -37,6 +39,9 @@ const STEPS: [(&str, f32); 15] = [
     ("teleport by sacrificing cargo (T T)", 60.0),
     ("die and respawn at the base", 5.0),
     ("save and reload keeps it all", 1.0),
+    ("new game from the Esc menu (pick twice)", 1.0),
+    ("drive off the fresh shop", 5.0),
+    ("dig the fresh mine to 100 m", 120.0),
 ];
 
 #[derive(Default)]
@@ -320,6 +325,14 @@ fn drive(step: usize, p: &mut Pilot, g: &mut Game, events: &[Event]) -> (Input, 
                 back && g.current_site().map(|s| s.kind) == Some(SiteKind::Base),
             )
         }
+        16 => (
+            Input {
+                left: true,
+                ..Input::default()
+            },
+            g.pod.x < SHOP_COLUMNS.0 - 3.0,
+        ),
+        17 => (p.dig_down(g), g.depth() >= 100.0),
         _ => {
             let json = serde_json::to_string(&g.to_save()).unwrap_or_default();
             let ok = serde_json::from_str(&json)
@@ -335,6 +348,47 @@ fn drive(step: usize, p: &mut Pilot, g: &mut Game, events: &[Event]) -> (Input, 
     }
 }
 
+const NEW_GAME_STEP: usize = 15;
+
+/// Picks New game twice in the real Esc menu, with a screenshot of the
+/// confirm, then runs the same reset the game does and checks the old mine
+/// is gone (and kept as a backup) and a different one took its place.
+async fn new_game(
+    dir: &Path,
+    game: &mut Game,
+    renderer: &mut Renderer,
+    art: &Art,
+) -> anyhow::Result<(bool, String)> {
+    let save = dir.join("save.json");
+    crate::save::write(&save, &game.to_save())?;
+    let old_seed = game.world.seed;
+    let mut menu = Menu::new();
+    menu.open = true;
+    let first = menu.pick(Choice::NewGame);
+    renderer.draw(game, art, true);
+    menu.draw(&Settings::default());
+    get_screen_data().export_png(&dir.join("15a_new_game_confirm.png").to_string_lossy());
+    next_frame().await;
+    let second = menu.pick(Choice::NewGame);
+    if second == Some(Choice::NewGame) {
+        crate::start_over(Some(&save), game, renderer);
+    }
+    let reloaded = match crate::save::load(&save)? {
+        crate::save::Loaded::Resumed(d) => Game::from_save(d).world.seed,
+        _ => 0,
+    };
+    let ok = first.is_none()
+        && second == Some(Choice::NewGame)
+        && !menu.open
+        && game.world.seed != old_seed
+        && reloaded == game.world.seed
+        && game.deaths == 0
+        && game.bases.is_empty()
+        && game.depth() < 1.0
+        && save.with_extension("previous.json").exists();
+    Ok((ok, format!("seed {old_seed} -> {}", game.world.seed)))
+}
+
 pub async fn run(dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)?;
     let art = Art::load(None);
@@ -346,7 +400,12 @@ pub async fn run(dir: &Path) -> anyhow::Result<()> {
     for (i, (name, timeout)) in STEPS.iter().enumerate() {
         let mut pilot = Pilot::default();
         let mut passed = false;
-        while pilot.t < *timeout {
+        if i == NEW_GAME_STEP {
+            let (ok, note) = new_game(dir, &mut game, &mut renderer, &art).await?;
+            passed = ok;
+            pilot.note = note;
+        }
+        while !passed && i != NEW_GAME_STEP && pilot.t < *timeout {
             let (input, done) = drive(i, &mut pilot, &mut game, &events);
             if done {
                 passed = true;
