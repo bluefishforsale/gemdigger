@@ -83,7 +83,7 @@ impl Audio {
         for track in &self.music {
             play_sound(track, silent());
         }
-        for name in ["drill", "thrust"] {
+        for name in ["drill", "thrust", "laser", "ion_charge"] {
             if let Some(s) = self.sfx.get(name) {
                 play_sound(s, silent());
             }
@@ -126,6 +126,20 @@ impl Audio {
                 },
             );
         }
+        if let Some(s) = self.sfx.get("laser") {
+            set_sound_volume(
+                s,
+                if sound && game.laser.is_some() {
+                    0.3
+                } else {
+                    0.0
+                },
+            );
+        }
+        if let Some(s) = self.sfx.get("ion_charge") {
+            let k = (game.ion_charge / crate::game::ION_CHARGE).min(1.0);
+            set_sound_volume(s, if sound { 0.35 * k } else { 0.0 });
+        }
         if let Some(s) = self.sfx.get("thrust") {
             set_sound_volume(
                 s,
@@ -150,6 +164,18 @@ impl Audio {
                     Item::Mineral(_) => self.play("clink", 0.7),
                 },
                 Event::Crafted => self.play("craft", 0.9),
+                Event::BoughtGun(_) => self.play("buy", 0.7),
+                Event::RocketFired => self.play("rocket", 0.8),
+                Event::RelicDropped { .. } => self.play("stash", 0.7),
+                Event::RelicFound(_) => self.play("craft", 1.0),
+                Event::BaseBuilt { .. } => self.play("craft", 0.9),
+                Event::BoughtBaseKit => self.play("buy", 0.7),
+                Event::TeleportArmed => self.play("low_fuel", 0.5),
+                Event::Teleported { .. } => self.play("respawn", 1.0),
+                Event::CantTeleport(_) => self.play("deny", 0.6),
+                Event::Pinged => self.play("ping", 0.8),
+                Event::CantBuild(_) => self.play("deny", 0.6),
+                Event::IonFired { .. } => self.play("ion", 1.0),
                 Event::CantCraft => self.play("deny", 0.6),
                 Event::BombPlaced { .. } => self.play("fuse", 0.8),
                 Event::Exploded { .. } => self.play("boom", 1.0),

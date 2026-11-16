@@ -8,7 +8,8 @@ use macroquad::rand::gen_range;
 
 use crate::art::Art;
 use crate::game::{
-    BOMB_POUCH, Event, FUSE, Game, Item, MAX_LEVEL, POD_HALF, SHOP_COLUMNS, ShopAction, Upgrade,
+    BASE_KIT_PRICE, BOMB_POUCH, Event, FUSE, Game, Gun, Item, MAX_BASE_KITS, MAX_LEVEL, POD_HALF,
+    SHOP_COLUMNS, ShopAction, SiteKind, Upgrade,
 };
 use crate::monsters::{Monster, Phase, Size};
 use crate::world::Mineral;
@@ -57,7 +58,7 @@ struct Toast {
 pub struct ShopButton {
     pub rect: Rect,
     pub action: ShopAction,
-    pub key: KeyCode,
+    pub key: Option<KeyCode>,
     label: String,
     detail: String,
     enabled: bool,
@@ -73,7 +74,38 @@ pub struct Renderer {
     t: f32,
     flash: f32,
     birds: Vec<Bird>,
+    effects: Vec<Effect>,
+    critters: Vec<Critter>,
     next_flock: f32,
+}
+
+/// A one-shot sprite animation (an explosion, a smoke puff) in world space.
+struct Effect {
+    /// Frames are `{prefix}_0`, `{prefix}_1`, ...
+    prefix: &'static str,
+    x: f32,
+    y: f32,
+    t: f32,
+    dur: f32,
+    /// Size in tiles.
+    size: f32,
+    /// Tiles per second it drifts upward.
+    rise: f32,
+    /// Plays the frames in order; otherwise holds one frame picked by `variant`.
+    animate: bool,
+    variant: usize,
+}
+
+/// A harmless little creature wandering an open cave, for life underground.
+struct Critter {
+    prefix: &'static str,
+    x: f32,
+    y: f32,
+    home: f32,
+    dir: f32,
+    phase: f32,
+    /// Fireflies and ghosts drift and glow; the rest walk the floor.
+    floats: bool,
 }
 
 /// A small bird crossing the sky, in screen space above the horizon.
@@ -255,6 +287,82 @@ fn draw_tree(x: f32, base: f32, s: f32, kind: u64, shade: f32) {
     }
 }
 
+/// A decoration in an open cave tile: purely visual, never in the way.
+#[derive(Clone, Copy)]
+struct Decor {
+    /// Sprite name, or the prefix of numbered variants.
+    name: &'static str,
+    /// Hangs from the ceiling instead of standing on the floor.
+    hanging: bool,
+    /// Gives off light, so it shows through the dark.
+    glows: bool,
+}
+
+/// What decorates the open tile at (tx, ty), decided by the seed alone so it
+/// never moves or flickers between frames. About one in twenty open tiles.
+fn decor_at(game: &Game, tx: i32, ty: i32) -> Option<Decor> {
+    if ty < 3 || game.world.get(tx, ty) != Tile::Air {
+        return None;
+    }
+    let h = world::hash(game.world.seed, tx, ty, 50);
+    if world::unit(h) > 0.05 {
+        return None;
+    }
+    let band = world::band(ty);
+    let pick = |opts: &[Decor]| opts[((h >> 20) as usize) % opts.len()];
+    let d = |name, hanging, glows| Decor {
+        name,
+        hanging,
+        glows,
+    };
+    if game.world.get(tx, ty + 1).is_solid() {
+        let floor: &[Decor] = match band {
+            0 | 1 => &[
+                d("bones", false, false),
+                d("mine_support", false, false),
+                d("crate", false, false),
+                d("lantern", false, true),
+            ],
+            2 => &[
+                d("stalagmite", false, false),
+                d("crystal", false, true),
+                d("bones", false, false),
+                d("pillar", false, false),
+            ],
+            _ => &[
+                d("glow_mushroom", false, true),
+                d("crystal", false, true),
+                d("glow_plant", false, true),
+                d("stalagmite", false, false),
+                d("ruins", false, false),
+            ],
+        };
+        return Some(pick(floor));
+    }
+    if game.world.get(tx, ty - 1).is_solid() {
+        let ceiling: &[Decor] = match band {
+            0 | 1 => &[d("roots", true, false)],
+            _ => &[d("stalactite", true, false), d("roots", true, false)],
+        };
+        return Some(pick(ceiling));
+    }
+    None
+}
+
+/// The sprite for a decor name: the plain name, or one of its numbered variants.
+fn decor_sprite<'a>(art: &'a Art, name: &str, h: u64) -> Option<crate::art::Sprite<'a>> {
+    if let Some(s) = art.get(name) {
+        return Some(s);
+    }
+    let n = (0..8)
+        .take_while(|i| art.get(&format!("{name}_{i}")).is_some())
+        .count();
+    if n == 0 {
+        return None;
+    }
+    art.get(&format!("{name}_{}", (h as usize) % n))
+}
+
 /// How dark the deep is (0 = daylight) at a depth in tiles.
 fn darkness(depth: f32) -> f32 {
     ((depth - 10.0) / 350.0).clamp(0.0, 1.0).powf(0.8) * 0.96
@@ -290,6 +398,8 @@ impl Renderer {
             t: 0.0,
             flash: 0.0,
             birds: Vec::new(),
+            effects: Vec::new(),
+            critters: Vec::new(),
             next_flock: 4.0,
         }
     }
@@ -302,6 +412,168 @@ impl Renderer {
     /// Sends a flock across right away rather than after the usual wait.
     pub fn prime_birds(&mut self) {
         self.next_flock = 0.0;
+    }
+
+    #[allow(clippy::too_many_arguments)] // Mirrors Effect's fields.
+    fn effect(
+        &mut self,
+        prefix: &'static str,
+        x: f32,
+        y: f32,
+        dur: f32,
+        size: f32,
+        rise: f32,
+        animate: bool,
+    ) {
+        self.effects.push(Effect {
+            prefix,
+            x,
+            y,
+            t: 0.0,
+            dur,
+            size,
+            rise,
+            animate,
+            variant: gen_range(0, 16),
+        });
+    }
+
+    /// Keeps a few critters around the open caves on screen, never in the sky.
+    fn update_critters(&mut self, dt: f32, game: &Game) {
+        let (sw, sh) = (screen_width(), screen_height());
+        let (vx0, vy0) = (
+            self.cam.x / TILE - sw / TILE / 2.0,
+            self.cam.y / TILE - sh / TILE / 2.0,
+        );
+        let (vx1, vy1) = (vx0 + sw / TILE, vy0 + sh / TILE);
+        self.critters
+            .retain(|c| c.x > vx0 - 4.0 && c.x < vx1 + 4.0 && c.y > vy0 - 4.0 && c.y < vy1 + 4.0);
+        for c in &mut self.critters {
+            c.phase += dt;
+            if c.floats {
+                c.x = c.home + (c.phase * 0.6).sin() * 1.5;
+                continue;
+            }
+            let nx = c.x + c.dir * 0.6 * dt;
+            let floor_ok = game
+                .world
+                .get(nx.floor() as i32, c.y.floor() as i32 + 1)
+                .is_solid();
+            let open = game.world.get(nx.floor() as i32, c.y.floor() as i32) == Tile::Air;
+            if (nx - c.home).abs() > 2.0 || !floor_ok || !open {
+                c.dir = -c.dir;
+            } else {
+                c.x = nx;
+            }
+        }
+        if self.critters.len() >= 4 || gen_range(0.0, 1.0) > 0.02 {
+            return;
+        }
+        // Try a random open floor tile on screen.
+        let tx = gen_range(vx0 as i32, vx1 as i32 + 1);
+        let ty = gen_range((vy0 as i32).max(3), vy1 as i32 + 1);
+        if ty < 3 || game.world.get(tx, ty) != Tile::Air || !game.world.get(tx, ty + 1).is_solid() {
+            return;
+        }
+        let shallow = [
+            "critter_mole",
+            "critter_beetle",
+            "critter_leaf",
+            "critter_mushroom",
+            "critter_spider",
+        ];
+        let deep = [
+            "critter_firefly",
+            "critter_ghost",
+            "critter_golem",
+            "critter_beetle",
+            "critter_mushroom",
+        ];
+        let pool: &[&'static str] = if world::band(ty) <= 1 {
+            &shallow
+        } else {
+            &deep
+        };
+        let prefix = pool[gen_range(0, pool.len())];
+        let floats = matches!(prefix, "critter_firefly" | "critter_ghost");
+        let x = tx as f32 + 0.5;
+        self.critters.push(Critter {
+            prefix,
+            x,
+            y: ty as f32 + if floats { 0.3 } else { 0.5 },
+            home: x,
+            dir: if gen_range(0.0, 1.0) < 0.5 { -1.0 } else { 1.0 },
+            phase: gen_range(0.0, TAU),
+            floats,
+        });
+    }
+
+    fn draw_critters(&self, art: &Art) {
+        for c in &self.critters {
+            let frame = (c.phase * 3.0) as i32 % 2;
+            let Some(s) = art.get(&format!("{}_{frame}", c.prefix)) else {
+                continue;
+            };
+            let size = TILE * if c.floats { 0.55 } else { 0.7 };
+            let k = (size / s.size().x).min(size / s.size().y);
+            let (w, h) = (s.size().x * k, s.size().y * k);
+            let bob = if c.floats {
+                (c.phase * 2.0).sin() * 4.0
+            } else {
+                0.0
+            };
+            let p = self.screen(c.x, c.y);
+            let bottom = if c.floats {
+                p.y + h / 2.0
+            } else {
+                p.y + TILE * 0.5
+            };
+            s.draw_ex(
+                p.x - w / 2.0,
+                bottom - h + bob,
+                w,
+                h,
+                WHITE,
+                c.dir < 0.0,
+                0.0,
+            );
+        }
+    }
+
+    fn draw_effects(&self, art: &Art) {
+        for e in &self.effects {
+            let n = (0..16)
+                .take_while(|i| art.get(&format!("{}_{i}", e.prefix)).is_some())
+                .count();
+            if n == 0 {
+                continue;
+            }
+            let k = e.t / e.dur;
+            let frame = if e.animate {
+                ((k * n as f32) as usize).min(n - 1)
+            } else {
+                e.variant % n
+            };
+            let Some(s) = art.get(&format!("{}_{frame}", e.prefix)) else {
+                continue;
+            };
+            let size = e.size
+                * TILE
+                * if e.animate {
+                    0.7 + 0.5 * k
+                } else {
+                    0.8 + 0.4 * k
+                };
+            let a = if e.animate {
+                1.0 - k * 0.5
+            } else {
+                0.8 * (1.0 - k)
+            };
+            let r = (size / s.size().x).min(size / s.size().y);
+            let (w, h) = (s.size().x * r, s.size().y * r);
+            let p = self.screen(e.x, e.y);
+            s.draw(p.x - w / 2.0, p.y - h / 2.0, w, h, with_alpha(WHITE, a));
+        }
     }
 
     pub fn toast(&mut self, text: impl Into<String>) {
@@ -347,7 +619,13 @@ impl Renderer {
     pub fn update(&mut self, dt: f32, game: &Game, events: &[Event]) {
         self.t += dt;
         self.flash = (self.flash - dt * 1.5).max(0.0);
-        let target = vec2(game.pod.x, game.pod.y) * TILE;
+        let mut target = vec2(game.pod.x, game.pod.y) * TILE;
+        // NOTE: the shop panel covers the right ~720 px, so while shopping the
+        // camera slides right to keep the pod and building in the open space
+        // to its left instead of hidden under the menu.
+        if game.at_shop() {
+            target.x += 360.0;
+        }
         self.cam += (target - self.cam) * (1.0 - (-dt * 8.0).exp());
 
         for e in events {
@@ -446,11 +724,29 @@ impl Renderer {
             b.x += b.vx * dt;
         }
         self.birds.retain(|b| b.x > -120.0 && b.x < sw + 120.0);
+
+        for e in &mut self.effects {
+            e.t += dt;
+            e.y -= e.rise * dt;
+        }
+        self.effects.retain(|e| e.t < e.dur);
+        self.update_critters(dt, game);
     }
 
     fn react(&mut self, e: &Event, game: &Game) {
         match e {
             Event::DigStarted { x, y } => {
+                if gen_range(0.0, 1.0) < 0.35 {
+                    self.effect(
+                        "fx_dust",
+                        *x as f32 + 0.5,
+                        *y as f32 + 0.3,
+                        0.6,
+                        1.0,
+                        0.6,
+                        false,
+                    );
+                }
                 let color = tile_color(game.world.get(*x, *y), *y);
                 self.burst(*x as f32 + 0.5, *y as f32 + 0.5, 8, color, 2.5, 8.0, false);
             }
@@ -585,6 +881,19 @@ impl Renderer {
             Event::BombPlaced { .. } => self.toast("Fuse lit! Get clear!"),
             Event::Exploded { x, y } => {
                 self.flash = self.flash.max(0.35);
+                self.effect("fx_explosion", *x, *y, 0.45, 3.2, 0.0, true);
+                for i in 0..3 {
+                    let k = i as f32;
+                    self.effect(
+                        "fx_smoke",
+                        *x + (k - 1.0) * 0.6,
+                        *y - 0.3,
+                        1.6 + 0.3 * k,
+                        1.6,
+                        0.9,
+                        false,
+                    );
+                }
                 self.burst(*x, *y, 60, Color::new(1.0, 0.65, 0.2, 1.0), 9.0, 0.0, true);
                 self.burst(*x, *y, 30, Color::new(1.0, 0.95, 0.7, 1.0), 4.0, 0.0, true);
                 self.burst(
@@ -601,7 +910,62 @@ impl Renderer {
                 self.toast("Got it!");
                 self.burst(*x, *y, 30, Color::new(0.6, 0.3, 0.8, 1.0), 6.0, 8.0, true);
             }
-            Event::MonsterStunned { .. } => self.toast("The Deep Thing is stunned! Fly up!"),
+            Event::MonsterStunned { .. } => self.toast("Stunned it! Fly up!"),
+            Event::BoughtGun(g) => {
+                self.toast(format!("{} bought!", g.name()));
+                self.burst(
+                    game.pod.x,
+                    game.pod.y,
+                    30,
+                    Color::new(0.5, 0.9, 1.0, 1.0),
+                    5.0,
+                    0.0,
+                    true,
+                );
+            }
+            Event::RocketFired => {}
+            Event::BaseBuilt { x, y } => {
+                self.toast("Base built! You'll restart here, and it's a full shop.");
+                self.burst(*x, *y, 40, Color::new(1.0, 0.75, 0.35, 1.0), 5.0, 0.0, true);
+            }
+            Event::BoughtBaseKit => self.toast("Base kit bought. Press P underground to build it."),
+            Event::TeleportArmed => {
+                self.toast("Press T again to sacrifice your cargo and teleport")
+            }
+            Event::Teleported { sacrificed } => {
+                self.toast(format!("Teleported! {sacrificed} items sacrificed."));
+                self.flash = self.flash.max(0.6);
+                self.cam = vec2(game.pod.x, game.pod.y) * TILE;
+                self.burst(
+                    game.pod.x,
+                    game.pod.y,
+                    50,
+                    Color::new(0.7, 0.5, 1.0, 1.0),
+                    6.0,
+                    0.0,
+                    true,
+                );
+            }
+            Event::CantTeleport(why) => self.toast(*why),
+            Event::Pinged => {}
+            Event::CantBuild(why) => self.toast(*why),
+            Event::RelicDropped { x, y } => {
+                self.toast("Something dropped a relic!");
+                self.burst(*x, *y, 30, GOLD, 5.0, 0.0, true);
+            }
+            Event::RelicFound(r) => {
+                self.toast(format!("Relic found! {}", r.name()));
+                self.flash = self.flash.max(0.3);
+                self.burst(game.pod.x, game.pod.y, 50, GOLD, 6.0, 0.0, true);
+            }
+            Event::IonFired { x0, x1, y } => {
+                self.flash = self.flash.max(0.12);
+                let n = ((x1 - x0).abs() * 3.0) as usize;
+                for i in 0..n {
+                    let x = x0 + (x1 - x0) * i as f32 / n.max(1) as f32;
+                    self.burst(x, *y, 1, Color::new(0.6, 0.9, 1.0, 1.0), 3.0, 0.0, true);
+                }
+            }
         }
     }
 
@@ -630,20 +994,25 @@ impl Renderer {
         self.view = (cam - vec2(sw / 2.0, sh / 2.0) + shake).round();
 
         clear_background(Color::new(0.02, 0.02, 0.04, 1.0));
-        self.draw_sky(sw);
+        self.draw_sky(art, sw);
         self.draw_tiles(game, art, sw, sh);
         self.draw_shop(art);
+        self.draw_sites(game, art, sh);
         self.draw_stashes(game, art);
+        self.draw_critters(art);
         self.draw_bombs(game);
+        self.draw_rockets(game);
         for m in &game.monsters {
             self.draw_monster(m, art);
         }
         self.draw_pod(game, art);
         self.draw_particles(false);
+        self.draw_effects(art);
         self.draw_darkness(game, sw, sh);
-        self.draw_glints(game, sw, sh);
+        self.draw_glints(game, art, sw, sh);
         self.draw_particles(true);
         self.draw_stash_arrows(game, sw, sh);
+        self.draw_radar(game, sw, sh);
         if self.flash > 0.0 {
             draw_rectangle(
                 0.0,
@@ -660,7 +1029,7 @@ impl Renderer {
         self.draw_toasts(sw);
     }
 
-    fn draw_sky(&self, sw: f32) {
+    fn draw_sky(&self, art: &Art, sw: f32) {
         if self.view.y >= 0.0 {
             return;
         }
@@ -693,28 +1062,36 @@ impl Renderer {
         }
         draw_circle(sun.x, sun.y, 26.0, Color::new(1.0, 0.98, 0.9, 0.95));
 
-        self.draw_clouds(sw, ground, 0.04, 5.0, 0.9, 7, 11);
-        // Far to near: each ridge moves a little more with the camera than the last.
+        self.draw_clouds(art, sw, ground, 0.04, 5.0, 0.9, 7, 11);
+        // Far to near: each layer moves a little more with the camera than the
+        // last. Painted mountains when the art is there, drawn ridges otherwise.
+        if !self.draw_strip(art, "mountains_far", sw, ground + 6.0, 250.0, 0.08) {
+            self.draw_ridge(
+                art,
+                sw,
+                ground,
+                0.08,
+                230.0,
+                Color::new(0.62, 0.72, 0.86, 1.0),
+                1,
+                false,
+            );
+        }
+        self.draw_clouds(art, sw, ground, 0.12, 11.0, 0.6, 5, 12);
+        if !self.draw_strip(art, "mountains_near", sw, ground + 6.0, 170.0, 0.22) {
+            self.draw_ridge(
+                art,
+                sw,
+                ground,
+                0.22,
+                150.0,
+                Color::new(0.5, 0.7, 0.66, 1.0),
+                2,
+                false,
+            );
+        }
         self.draw_ridge(
-            sw,
-            ground,
-            0.08,
-            230.0,
-            Color::new(0.62, 0.72, 0.86, 1.0),
-            1,
-            false,
-        );
-        self.draw_clouds(sw, ground, 0.12, 11.0, 0.6, 5, 12);
-        self.draw_ridge(
-            sw,
-            ground,
-            0.22,
-            150.0,
-            Color::new(0.5, 0.7, 0.66, 1.0),
-            2,
-            false,
-        );
-        self.draw_ridge(
+            art,
             sw,
             ground,
             0.45,
@@ -726,10 +1103,41 @@ impl Renderer {
         self.draw_birds(ground);
     }
 
+    /// A painted strip (a mountain range) repeated across the sky, standing on
+    /// `bottom`, `height` pixels tall. False if the sprite isn't there.
+    fn draw_strip(
+        &self,
+        art: &Art,
+        name: &str,
+        sw: f32,
+        bottom: f32,
+        height: f32,
+        parallax: f32,
+    ) -> bool {
+        let Some(s) = art.get(name) else {
+            return false;
+        };
+        let w = height * s.size().x / s.size().y;
+        let mut x = -(self.view.x * parallax).rem_euclid(w);
+        while x < sw {
+            s.draw(x, bottom - height, w + 1.0, height, WHITE);
+            x += w;
+        }
+        true
+    }
+
+    /// Names that exist for `prefix_0`, `prefix_1`, ... in the atlas.
+    fn variants<'a>(art: &'a Art, prefix: &str) -> Vec<crate::art::Sprite<'a>> {
+        (0..16)
+            .map_while(|i| art.get(&format!("{prefix}_{i}")))
+            .collect()
+    }
+
     /// A rolling ridge line made of a few slow sine waves, drawn as thin columns.
     #[allow(clippy::too_many_arguments)] // Private layer helper; the args are the layer.
     fn draw_ridge(
         &self,
+        art: &Art,
         sw: f32,
         ground: f32,
         parallax: f32,
@@ -763,6 +1171,8 @@ impl Renderer {
         // poplars and bushes, each standing on the hill where it's drawn.
         let spacing = 30.0;
         let first = (offset / spacing).floor() as i32 - 1;
+        let mut painted = Self::variants(art, "tree");
+        painted.extend(Self::variants(art, "bush"));
         for i in first..first + (sw / spacing) as i32 + 3 {
             let h = world::hash(seed, i, 0, 21);
             if world::unit(h) < 0.35 {
@@ -771,7 +1181,14 @@ impl Renderer {
             let u = i as f32 * spacing + world::unit(h >> 8) * 18.0;
             let base = ground - ridge(u) + 3.0;
             let s = 0.7 + 0.7 * world::unit(h >> 16);
-            draw_tree(u - offset, base, s, (h >> 24) % 4, world::unit(h >> 32));
+            if painted.is_empty() {
+                draw_tree(u - offset, base, s, (h >> 24) % 4, world::unit(h >> 32));
+                continue;
+            }
+            let sprite = painted[((h >> 24) as usize) % painted.len()];
+            let th = 44.0 * s;
+            let tw = th * sprite.size().x / sprite.size().y;
+            sprite.draw(u - offset - tw / 2.0, base - th, tw, th, WHITE);
         }
     }
 
@@ -779,6 +1196,7 @@ impl Renderer {
     #[allow(clippy::too_many_arguments)] // Private layer helper; the args are the layer.
     fn draw_clouds(
         &self,
+        art: &Art,
         sw: f32,
         ground: f32,
         parallax: f32,
@@ -791,6 +1209,7 @@ impl Renderer {
         let span = sw + 2.0 * margin;
         let shade = Color::new(0.84, 0.85, 0.95, 0.95);
         let white = Color::new(1.0, 1.0, 0.99, 0.97);
+        let painted = Self::variants(art, "cloud");
         for i in 0..count {
             let h1 = world::unit(world::hash(seed, i, 1, 31));
             let h2 = world::unit(world::hash(seed, i, 2, 31));
@@ -798,6 +1217,13 @@ impl Renderer {
             let travel = h1 * span - self.t * wind - self.view.x * parallax;
             let x = travel.rem_euclid(span) - margin;
             let y = ground - (170.0 + 230.0 * h2) * (0.6 + scale * 0.5);
+            if !painted.is_empty() {
+                let c = painted[i as usize % painted.len()];
+                let cw = 4.2 * r;
+                let ch = cw * c.size().y / c.size().x;
+                c.draw(x - cw / 2.0, y - ch / 2.0, cw, ch, with_alpha(WHITE, 0.95));
+                continue;
+            }
             let puffs = [
                 (-1.25, 0.15, 0.6),
                 (-0.6, -0.15, 0.82),
@@ -891,6 +1317,61 @@ impl Renderer {
         for (p, m, h) in minerals {
             draw_mineral(p, m, h);
         }
+        // Decor last, so it sits in front of the cave wall behind it.
+        for ty in y0.max(3)..=y1 {
+            for tx in x0..=x1 {
+                let Some(d) = decor_at(game, tx, ty) else {
+                    continue;
+                };
+                let Some(s) = decor_sprite(art, d.name, world::hash(seed, tx, ty, 51)) else {
+                    continue;
+                };
+                let p = self.screen(tx as f32, ty as f32);
+                let k = (TILE * 0.95 / s.size().x).min(TILE * 0.95 / s.size().y);
+                let (w, h) = (s.size().x * k, s.size().y * k);
+                let y = if d.hanging { p.y } else { p.y + TILE - h };
+                s.draw(p.x + (TILE - w) / 2.0, y, w, h, WHITE);
+            }
+        }
+    }
+
+    /// Deep outposts and her bases. The surface shop has its own drawing.
+    fn draw_sites(&self, game: &Game, art: &Art, sh: f32) {
+        let mid = (self.view.y + sh / 2.0) / TILE;
+        for site in game.sites_near(mid) {
+            let base = self.screen(site.x, site.floor as f32);
+            let (name, w) = match site.kind {
+                SiteKind::Surface => continue,
+                SiteKind::Outpost => ("cottage", 2.0 * site.half * TILE * 0.9),
+                SiteKind::Base => ("tent", 2.0 * site.half * TILE),
+            };
+            if base.y < -4.0 * TILE || base.y > sh + 4.0 * TILE {
+                continue;
+            }
+            // Lantern light so the place reads as safe in the dark.
+            let r = w * 0.9;
+            draw_texture_ex(
+                &self.glow,
+                base.x - r,
+                base.y - r * 1.2,
+                Color::new(1.0, 0.75, 0.4, 0.35),
+                DrawTextureParams {
+                    dest_size: Some(vec2(2.0 * r, 2.0 * r)),
+                    ..Default::default()
+                },
+            );
+            let sprite = art.get(name).or_else(|| art.get("shop"));
+            if let Some(s) = sprite {
+                let h = w * s.size().y / s.size().x;
+                s.draw(base.x - w / 2.0, base.y - h, w, h, WHITE);
+            }
+            if site.kind == SiteKind::Base
+                && let Some(fire) = art.get("campfire")
+            {
+                let fw = TILE * 0.8;
+                fire.draw(base.x + w / 2.0, base.y - fw, fw, fw, WHITE);
+            }
+        }
     }
 
     fn draw_shop(&self, art: &Art) {
@@ -918,6 +1399,26 @@ impl Renderer {
             30.0,
             Color::new(0.35, 0.2, 0.1, 1.0),
         );
+    }
+
+    fn draw_rockets(&self, game: &Game) {
+        for r in &game.rockets {
+            let p = self.screen(r.x, r.y);
+            let d = r.vx.signum();
+            draw_rectangle(
+                p.x - 9.0,
+                p.y - 3.0,
+                18.0,
+                6.0,
+                Color::new(0.75, 0.75, 0.8, 1.0),
+            );
+            draw_triangle(
+                vec2(p.x + d * 9.0, p.y - 3.0),
+                vec2(p.x + d * 9.0, p.y + 3.0),
+                vec2(p.x + d * 15.0, p.y),
+                Color::new(0.9, 0.25, 0.2, 1.0),
+            );
+        }
     }
 
     fn draw_bombs(&self, game: &Game) {
@@ -981,27 +1482,42 @@ impl Renderer {
             }
             return;
         }
-        let frame = (self.t * 4.0 + m.x) as i32 % 2;
-        let bob = if m.size == Size::Medium {
-            (self.t * 6.0).sin() * 4.0
-        } else {
-            0.0
-        };
-        let tint = match m.size {
-            Size::Huge => Color::new(0.55, 0.35, 0.75, 1.0),
-            _ => WHITE,
-        };
         let dest = vec2(w * TILE * 1.15, h * TILE * 1.15);
-        match art.get(&format!("{}_{frame}", monster_sprite(m.size))) {
-            Some(tex) => tex.draw_ex(
-                p.x - dest.x / 2.0,
-                p.y - dest.y / 2.0 + bob,
-                dest.x,
-                dest.y,
-                tint,
-                m.dir < 0.0,
-                0.0,
-            ),
+        // The new 8-frame creature art, or the older 2-frame sprites until it's in.
+        let frame8 = (self.t * 8.0 + m.x) as i32 % 8;
+        let frame2 = (self.t * 4.0 + m.x) as i32 % 2;
+        let (sprite, tint, bob) = match art.get(&format!("{}_{frame8}", m.kind.sprite())) {
+            Some(s) => (Some(s), WHITE, 0.0),
+            None => {
+                let tint = if m.size == Size::Huge {
+                    Color::new(0.55, 0.35, 0.75, 1.0)
+                } else {
+                    WHITE
+                };
+                let bob = if m.size == Size::Medium {
+                    (self.t * 6.0).sin() * 4.0
+                } else {
+                    0.0
+                };
+                let old = format!("{}_{frame2}", monster_sprite(m.size));
+                (art.get(&old), tint, bob)
+            }
+        };
+        match sprite {
+            Some(tex) => {
+                // Fit inside the body box without stretching the art.
+                let k = (dest.x / tex.size().x).min(dest.y / tex.size().y);
+                let (dw, dh) = (tex.size().x * k, tex.size().y * k);
+                tex.draw_ex(
+                    p.x - dw / 2.0,
+                    p.y + dest.y / 2.0 - dh + bob,
+                    dw,
+                    dh,
+                    tint,
+                    m.dir < 0.0,
+                    0.0,
+                )
+            }
             None => draw_ellipse(
                 p.x,
                 p.y,
@@ -1145,7 +1661,7 @@ impl Renderer {
         draw_rectangle(rt, t, (sw - rt).max(0.0), 2.0 * r, shade);
     }
 
-    fn draw_glints(&self, game: &Game, sw: f32, sh: f32) {
+    fn draw_glints(&self, game: &Game, art: &Art, sw: f32, sh: f32) {
         let (c, r) = self.light(game);
         let seed = game.world.seed;
         let x0 = (self.view.x / TILE).floor() as i32;
@@ -1219,6 +1735,11 @@ impl Renderer {
             }
         }
 
+        self.draw_decor_glow(game, sw, sh);
+        self.draw_beams(game);
+        self.draw_relic_drops(game, art);
+        self.draw_health_bars(game);
+
         // The fuse spark blinks faster as it burns down.
         for b in &game.live_bombs {
             let p = self.screen(b.x, b.y);
@@ -1253,64 +1774,361 @@ impl Renderer {
         }
     }
 
-    fn draw_stash_arrows(&self, game: &Game, sw: f32, sh: f32) {
-        let from = self.screen(game.pod.x, game.pod.y);
-        let margin = 56.0;
-        for s in &game.stashes {
-            let to = self.screen(s.x, s.y);
-            if to.x > margin && to.x < sw - margin && to.y > margin && to.y < sh - margin {
-                continue;
+    /// Glowing mushrooms, crystals and lanterns light their corner of the dark.
+    fn draw_decor_glow(&self, game: &Game, sw: f32, sh: f32) {
+        let x0 = (self.view.x / TILE).floor() as i32;
+        let y0 = (self.view.y / TILE).floor() as i32;
+        let x1 = ((self.view.x + sw) / TILE).ceil() as i32;
+        let y1 = ((self.view.y + sh) / TILE).ceil() as i32;
+        for ty in y0.max(3)..=y1 {
+            for tx in x0..=x1 {
+                let Some(d) = decor_at(game, tx, ty) else {
+                    continue;
+                };
+                if !d.glows {
+                    continue;
+                }
+                let p = self.screen(tx as f32 + 0.5, ty as f32 + 0.6);
+                let pulse = 0.8 + 0.2 * (self.t * 1.5 + tx as f32).sin();
+                let r = TILE * 1.3 * pulse;
+                let color = match d.name {
+                    "lantern" => Color::new(1.0, 0.75, 0.35, 0.55),
+                    "crystal" => Color::new(0.55, 0.85, 1.0, 0.5),
+                    _ => Color::new(0.5, 0.4, 1.0, 0.5),
+                };
+                draw_texture_ex(
+                    &self.glow,
+                    p.x - r,
+                    p.y - r,
+                    color,
+                    DrawTextureParams {
+                        dest_size: Some(vec2(2.0 * r, 2.0 * r)),
+                        ..Default::default()
+                    },
+                );
             }
-            let dir = (to - from).normalize_or_zero();
-            if dir == Vec2::ZERO {
-                continue;
-            }
-            // Where the line from the pod to the stash crosses the inset screen edge.
-            let tx = if dir.x > 0.0 {
-                (sw - margin - from.x) / dir.x
-            } else if dir.x < 0.0 {
-                (margin - from.x) / dir.x
-            } else {
-                f32::INFINITY
-            };
-            let ty = if dir.y > 0.0 {
-                (sh - margin - from.y) / dir.y
-            } else if dir.y < 0.0 {
-                (margin - from.y) / dir.y
-            } else {
-                f32::INFINITY
-            };
-            let at = from + dir * tx.min(ty).max(0.0);
-            let pulse = 0.75 + 0.25 * (self.t * 4.0).sin();
-            let size = 22.0 * pulse.max(0.8);
-            let perp = vec2(-dir.y, dir.x);
-            let color = Color::new(0.85, 0.55, 1.0, 1.0);
+        }
+    }
+
+    /// Relics glow over the dark so a drop is never lost in it.
+    fn draw_relic_drops(&self, game: &Game, art: &Art) {
+        for (i, d) in game.drops.iter().enumerate() {
+            let bob = (self.t * 3.0 + i as f32).sin() * 4.0;
+            let p = self.screen(d.x, d.y) + vec2(0.0, bob);
+            let r = TILE * (0.9 + 0.2 * (self.t * 4.0).sin());
             draw_texture_ex(
                 &self.glow,
-                at.x - 40.0,
-                at.y - 40.0,
-                with_alpha(color, 0.5 * pulse),
+                p.x - r,
+                p.y - r,
+                Color::new(1.0, 0.85, 0.35, 0.8),
                 DrawTextureParams {
-                    dest_size: Some(vec2(80.0, 80.0)),
+                    dest_size: Some(vec2(2.0 * r, 2.0 * r)),
                     ..Default::default()
                 },
             );
-            draw_triangle(
-                at + dir * size,
-                at - dir * size * 0.6 + perp * size * 0.7,
-                at - dir * size * 0.6 - perp * size * 0.7,
-                color,
+            let size = TILE * 0.7;
+            match art.get("relic_coin") {
+                Some(s) => s.draw(p.x - size / 2.0, p.y - size / 2.0, size, size, WHITE),
+                None => {
+                    draw_poly(p.x, p.y, 6, size * 0.45, self.t * 60.0, GOLD);
+                    draw_poly(
+                        p.x,
+                        p.y,
+                        6,
+                        size * 0.25,
+                        self.t * 60.0,
+                        Color::new(1.0, 0.95, 0.7, 1.0),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Laser, ion shot and the ion cannon's charge glow. Drawn over the dark,
+    /// since they're light sources themselves.
+    fn draw_beams(&self, game: &Game) {
+        if let Some(b) = game.laser {
+            let (a, c) = (self.screen(b.x0, b.y), self.screen(b.x1, b.y));
+            let flicker = 0.75 + 0.25 * (self.t * 40.0).sin();
+            draw_line(
+                a.x,
+                a.y,
+                c.x,
+                c.y,
+                7.0,
+                Color::new(1.0, 0.2, 0.25, 0.35 * flicker),
             );
-            let dist = (s.x - game.pod.x).hypot(s.y - game.pod.y).round();
-            let label = format!("Lost cargo {dist} m");
-            let lw = measure_text(&label, None, 20, 1.0).width;
-            let lx = (at.x - lw / 2.0).clamp(8.0, sw - lw - 8.0);
-            let ly = if dir.y > 0.0 {
-                at.y - 30.0
+            draw_line(
+                a.x,
+                a.y,
+                c.x,
+                c.y,
+                2.5,
+                Color::new(1.0, 0.85, 0.85, flicker),
+            );
+            let r = 14.0;
+            draw_texture_ex(
+                &self.glow,
+                c.x - r,
+                c.y - r,
+                Color::new(1.0, 0.4, 0.3, 0.9),
+                DrawTextureParams {
+                    dest_size: Some(vec2(2.0 * r, 2.0 * r)),
+                    ..Default::default()
+                },
+            );
+        }
+        if let Some(b) = game.ion_beam {
+            let (a, c) = (self.screen(b.x0, b.y), self.screen(b.x1, b.y));
+            let k = (b.t / 0.35).clamp(0.0, 1.0);
+            draw_line(
+                a.x,
+                a.y,
+                c.x,
+                c.y,
+                26.0 * k,
+                Color::new(0.4, 0.8, 1.0, 0.45 * k),
+            );
+            draw_line(a.x, a.y, c.x, c.y, 9.0 * k, Color::new(0.9, 1.0, 1.0, k));
+        }
+        if game.ion_charge > 0.0 {
+            let k = (game.ion_charge / crate::game::ION_CHARGE).min(1.0);
+            let p = self.screen(game.pod.x + game.pod.facing * POD_HALF, game.pod.y);
+            let r = 8.0
+                + 26.0 * k
+                + if k >= 1.0 {
+                    (self.t * 20.0).sin() * 3.0
+                } else {
+                    0.0
+                };
+            draw_texture_ex(
+                &self.glow,
+                p.x - r,
+                p.y - r,
+                Color::new(0.5, 0.85, 1.0, 0.5 + 0.5 * k),
+                DrawTextureParams {
+                    dest_size: Some(vec2(2.0 * r, 2.0 * r)),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+
+    /// A bar over each monster in or near the light, so you can see a fight
+    /// going your way, or that this weapon can't hurt it at all.
+    fn draw_health_bars(&self, game: &Game) {
+        let (c, r) = self.light(game);
+        for m in &game.monsters {
+            if !m.is_active() {
+                continue;
+            }
+            let (w, h) = m.size.dims();
+            let top = self.screen(m.x, m.y - h * 0.6);
+            if top.distance(c) > r * 1.3 + w * TILE {
+                continue;
+            }
+            let bw = (w * TILE * 0.8).clamp(30.0, 140.0);
+            let (x, y) = (top.x - bw / 2.0, top.y - 10.0);
+            draw_rectangle(
+                x - 1.0,
+                y - 1.0,
+                bw + 2.0,
+                7.0,
+                Color::new(0.0, 0.0, 0.0, 0.7),
+            );
+            if m.immune_flash > 0.0 {
+                draw_rectangle(x, y, bw, 5.0, Color::new(0.55, 0.55, 0.6, 1.0));
+                text_centered(
+                    "bombs or ion only",
+                    top.x,
+                    y - 6.0,
+                    18.0,
+                    Color::new(0.85, 0.85, 0.9, 1.0),
+                );
             } else {
-                at.y + 40.0
+                let hp = m.health();
+                let fill = mix(
+                    Color::new(0.9, 0.2, 0.2, 1.0),
+                    Color::new(0.35, 0.9, 0.4, 1.0),
+                    hp,
+                );
+                draw_rectangle(x, y, bw * hp, 5.0, fill);
+            }
+        }
+    }
+
+    /// An arrow on the screen edge pointing at something off screen, labelled.
+    fn edge_arrow(&self, game: &Game, target: Vec2, color: Color, label: &str, sw: f32, sh: f32) {
+        let from = self.screen(game.pod.x, game.pod.y);
+        let margin = 56.0;
+        let to = self.screen(target.x, target.y);
+        if to.x > margin && to.x < sw - margin && to.y > margin && to.y < sh - margin {
+            return;
+        }
+        let dir = (to - from).normalize_or_zero();
+        if dir == Vec2::ZERO {
+            return;
+        }
+        // Where the line from the pod to the target crosses the inset screen edge.
+        let tx = if dir.x > 0.0 {
+            (sw - margin - from.x) / dir.x
+        } else if dir.x < 0.0 {
+            (margin - from.x) / dir.x
+        } else {
+            f32::INFINITY
+        };
+        let ty = if dir.y > 0.0 {
+            (sh - margin - from.y) / dir.y
+        } else if dir.y < 0.0 {
+            (margin - from.y) / dir.y
+        } else {
+            f32::INFINITY
+        };
+        let at = from + dir * tx.min(ty).max(0.0);
+        let pulse = 0.75 + 0.25 * (self.t * 4.0).sin();
+        let size = 22.0 * pulse.max(0.8);
+        let perp = vec2(-dir.y, dir.x);
+        draw_texture_ex(
+            &self.glow,
+            at.x - 40.0,
+            at.y - 40.0,
+            with_alpha(color, 0.5 * pulse),
+            DrawTextureParams {
+                dest_size: Some(vec2(80.0, 80.0)),
+                ..Default::default()
+            },
+        );
+        draw_triangle(
+            at + dir * size,
+            at - dir * size * 0.6 + perp * size * 0.7,
+            at - dir * size * 0.6 - perp * size * 0.7,
+            color,
+        );
+        let dist = (target.x - game.pod.x).hypot(target.y - game.pod.y).round();
+        let label = format!("{label} {dist} m");
+        let lw = measure_text(&label, None, 20, 1.0).width;
+        let lx = (at.x - lw / 2.0).clamp(8.0, sw - lw - 8.0);
+        let ly = if dir.y > 0.0 {
+            at.y - 30.0
+        } else {
+            at.y + 40.0
+        };
+        text(&label, lx, ly, 20.0, WHITE);
+    }
+
+    fn draw_stash_arrows(&self, game: &Game, sw: f32, sh: f32) {
+        for s in &game.stashes {
+            self.edge_arrow(
+                game,
+                vec2(s.x, s.y),
+                Color::new(0.85, 0.55, 1.0, 1.0),
+                "Lost cargo",
+                sw,
+                sh,
+            );
+        }
+        // And the nearest place to refuel, once she's underground.
+        if game.depth() > 2.0 {
+            let site = game.nearest_site(game.pod.x, game.pod.y);
+            let (x, y) = site.landing();
+            let label = match site.kind {
+                SiteKind::Surface => "Shop",
+                SiteKind::Outpost => "Outpost",
+                SiteKind::Base => "Base",
             };
-            text(&label, lx, ly, 20.0, WHITE);
+            self.edge_arrow(
+                game,
+                vec2(x, y),
+                Color::new(0.45, 1.0, 0.55, 1.0),
+                label,
+                sw,
+                sh,
+            );
+        }
+    }
+
+    /// Bottom-right mini-map: ground around her, shops, crates, monsters and
+    /// relics. A ping (Q) lights up the ore for a few seconds.
+    fn draw_radar(&self, game: &Game, sw: f32, sh: f32) {
+        const CELL: f32 = 3.0;
+        let (w, h) = (222.0, 159.0);
+        let (x0, y0) = (sw - w - 14.0, sh - h - 14.0);
+        draw_rectangle(x0 - 4.0, y0 - 24.0, w + 8.0, h + 28.0, PANEL);
+        let label = if game.ping_cooldown > 0.0 {
+            format!("RADAR   ping in {:.0}s", game.ping_cooldown.ceil())
+        } else {
+            "RADAR   Q to ping".to_string()
+        };
+        text(&label, x0, y0 - 6.0, 18.0, Color::new(0.6, 1.0, 0.7, 1.0));
+        let (cols, rows) = ((w / CELL) as i32, (h / CELL) as i32);
+        let (px, py) = (game.pod.x.floor() as i32, game.pod.y.floor() as i32);
+        let (tx0, ty0) = (px - cols / 2, py - rows / 2);
+        let pinging = game.ping > 0.0;
+        for r in 0..rows {
+            for c in 0..cols {
+                let (tx, ty) = (tx0 + c, ty0 + r);
+                let tile = game.world.get(tx, ty);
+                let near = ((tx - px).pow(2) + (ty - py).pow(2)) <= 25 * 25;
+                let color = match tile {
+                    Tile::Air if ty < 0 => Color::new(0.2, 0.3, 0.45, 1.0),
+                    Tile::Air => Color::new(0.03, 0.03, 0.05, 1.0),
+                    Tile::Wall => Color::new(0.3, 0.26, 0.36, 1.0),
+                    Tile::Boulder => Color::new(0.45, 0.45, 0.48, 1.0),
+                    Tile::Ore(t) if pinging && near => ORE_COLORS[(t as usize).min(5)],
+                    Tile::Mineral(m) if pinging && near => mineral_color(m),
+                    _ => mix(BAND_COLORS[world::band(ty)], BLACK, 0.45),
+                };
+                draw_rectangle(
+                    x0 + c as f32 * CELL,
+                    y0 + r as f32 * CELL,
+                    CELL,
+                    CELL,
+                    color,
+                );
+            }
+        }
+        // Markers; anything off the map is pinned to its edge.
+        let to_map = |x: f32, y: f32| {
+            vec2(
+                (x0 + (x - tx0 as f32) * CELL).clamp(x0 + 3.0, x0 + w - 3.0),
+                (y0 + (y - ty0 as f32) * CELL).clamp(y0 + 3.0, y0 + h - 3.0),
+            )
+        };
+        for site in game.sites_near(game.pod.y) {
+            let (sx, sy) = site.landing();
+            let p = to_map(sx, sy);
+            draw_rectangle(p.x - 3.0, p.y - 3.0, 7.0, 7.0, GOLD);
+        }
+        for s in &game.stashes {
+            let p = to_map(s.x, s.y);
+            draw_circle(p.x, p.y, 3.0, Color::new(0.85, 0.55, 1.0, 1.0));
+        }
+        for d in &game.drops {
+            let p = to_map(d.x, d.y);
+            draw_circle(p.x, p.y, 3.0, GOLD);
+        }
+        for m in &game.monsters {
+            let p = to_map(m.x, m.y);
+            draw_circle(
+                p.x,
+                p.y,
+                2.0 + m.size.dims().0,
+                Color::new(1.0, 0.25, 0.2, 1.0),
+            );
+        }
+        let p = to_map(game.pod.x, game.pod.y);
+        let blink = 0.6 + 0.4 * (self.t * 6.0).sin();
+        draw_circle(p.x, p.y, 3.5, with_alpha(WHITE, blink));
+        if pinging {
+            // The sonar ring sweeping outward.
+            let k = 1.0 - game.ping / crate::game::PING_REVEAL;
+            draw_circle_lines(
+                p.x,
+                p.y,
+                25.0 * CELL * k.min(1.0),
+                1.5,
+                Color::new(0.6, 1.0, 0.7, 1.0 - k),
+            );
         }
     }
 
@@ -1328,7 +2146,12 @@ impl Renderer {
             - gap;
         // Grow to fit the widest row, so counts in the tens and hundreds never spill.
         let width = 300.0f32.max(12.0 + minerals_w + 14.0);
-        draw_rectangle(x, y, width, 254.0, PANEL);
+        let has_kit = game.arsenal.laser
+            || game.arsenal.rockets
+            || game.arsenal.ion
+            || game.levels.relics() > 0;
+        let height = if has_kit { 286.0 } else { 254.0 };
+        draw_rectangle(x, y, width, height, PANEL);
         let icon = |name: &str, row: f32| {
             if let Some(tex) = art.get(name) {
                 tex.draw(x + 10.0, y + 8.0 + row * 33.0, 28.0, 28.0, WHITE);
@@ -1420,6 +2243,33 @@ impl Renderer {
             mx += 16.0 + measure_text(label, None, 20, 1.0).width + gap;
         }
 
+        // Guns she owns with their keys, and relics found.
+        let mut kit: Vec<&str> = Vec::new();
+        if game.arsenal.laser {
+            kit.push("F laser");
+        }
+        if game.arsenal.rockets {
+            kit.push("G rockets");
+        }
+        if game.arsenal.ion {
+            kit.push("H ion");
+        }
+        let relics = game.levels.relics();
+        if !kit.is_empty() || relics > 0 {
+            let line = if relics > 0 {
+                format!("{}   relics {relics}", kit.join("  "))
+            } else {
+                kit.join("  ")
+            };
+            text(
+                line.trim(),
+                x + 12.0,
+                y + 274.0,
+                20.0,
+                Color::new(0.6, 0.85, 1.0, 1.0),
+            );
+        }
+
         if game.depth() < 1.0 && !game.at_shop() {
             text_centered(
                 "Arrow keys or WASD to drive and dig.  Up to fly.  Sell gems at the shop.",
@@ -1448,10 +2298,11 @@ impl Renderer {
 
 /// The shop's rows, laid out for the current screen; shared by drawing and input.
 pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
-    let (w, h) = (360.0, 44.0);
-    let x = sw - w - 16.0;
-    let mut y = 64.0;
-    let mut rows = Vec::new();
+    // Two columns, services on the left, upgrades and weapons on the right,
+    // so the panel fits a 720-pixel-tall window. Number keys cover the first ten.
+    let (w, h, gap) = (340.0, 44.0, 6.0);
+    let right = sw - w - 16.0;
+    let left = right - w - 12.0;
     let keys = [
         KeyCode::Key1,
         KeyCode::Key2,
@@ -1464,20 +2315,23 @@ pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
         KeyCode::Key9,
         KeyCode::Key0,
     ];
-    let mut push = |action, label: String, detail: String, enabled: bool| {
-        let key = keys[rows.len()];
+    let mut rows: Vec<ShopButton> = Vec::new();
+    let mut ys = [64.0f32, 64.0f32];
+    let mut push = |col: usize, action, label: String, detail: String, enabled: bool| {
+        let x = if col == 0 { left } else { right };
         rows.push(ShopButton {
-            rect: Rect::new(x, y, w, h),
+            rect: Rect::new(x, ys[col], w, h),
             action,
-            key,
+            key: None,
             label,
             detail,
             enabled,
         });
-        y += h + 6.0;
+        ys[col] += h + gap;
     };
     let value = game.cargo_value();
     push(
+        0,
         ShopAction::Sell,
         "Sell gems".into(),
         format!("+{}", money(value)),
@@ -1485,12 +2339,14 @@ pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
     );
     let minerals = game.mineral_value();
     push(
+        0,
         ShopAction::SellMinerals,
         "Sell spare minerals".into(),
         format!("+{}", money(minerals)),
         minerals > 0,
     );
     push(
+        0,
         ShopAction::Craft,
         format!("Craft bomb  ({}/{BOMB_POUCH})", game.bombs),
         "C+S+P".into(),
@@ -1498,6 +2354,7 @@ pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
     );
     let fuel = game.refuel_cost();
     push(
+        0,
         ShopAction::Refuel,
         "Refuel".into(),
         money(fuel),
@@ -1505,46 +2362,100 @@ pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
     );
     let repair = game.repair_cost();
     push(
+        0,
         ShopAction::Repair,
         "Repair hull".into(),
         money(repair),
         repair > 0 && game.money > 0,
     );
+    push(
+        0,
+        ShopAction::BuyBaseKit,
+        format!("Base kit  ({}/{MAX_BASE_KITS})", game.base_kits),
+        money(BASE_KIT_PRICE),
+        game.base_kits < MAX_BASE_KITS && game.money >= BASE_KIT_PRICE,
+    );
     for u in Upgrade::ALL {
         let level = game.levels.get(u);
         let label = format!("{}  Lv {level}/{MAX_LEVEL}", u.name());
         if level >= MAX_LEVEL {
-            push(ShopAction::Buy(u), label, "MAX".into(), false);
+            push(1, ShopAction::Buy(u), label, "MAX".into(), false);
         } else {
             let cost = u.cost(level);
-            push(ShopAction::Buy(u), label, money(cost), game.money >= cost);
+            push(
+                1,
+                ShopAction::Buy(u),
+                label,
+                money(cost),
+                game.money >= cost,
+            );
         }
+    }
+    for g in Gun::ALL {
+        if game.arsenal.has(g) {
+            push(
+                1,
+                ShopAction::BuyGun(g),
+                g.name().into(),
+                "OWNED".into(),
+                false,
+            );
+        } else {
+            push(
+                1,
+                ShopAction::BuyGun(g),
+                g.name().into(),
+                money(g.price()),
+                game.money >= g.price(),
+            );
+        }
+    }
+    // Keys follow the old single-column order: services, then upgrades.
+    let keyed = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| !matches!(b.action, ShopAction::BuyGun(_) | ShopAction::BuyBaseKit))
+        .map(|(i, _)| i)
+        .take(keys.len())
+        .collect::<Vec<_>>();
+    for (k, i) in keyed.into_iter().enumerate() {
+        rows[i].key = Some(keys[k]);
     }
     rows
 }
 
+fn key_digit(k: KeyCode) -> char {
+    match k {
+        KeyCode::Key1 => '1',
+        KeyCode::Key2 => '2',
+        KeyCode::Key3 => '3',
+        KeyCode::Key4 => '4',
+        KeyCode::Key5 => '5',
+        KeyCode::Key6 => '6',
+        KeyCode::Key7 => '7',
+        KeyCode::Key8 => '8',
+        KeyCode::Key9 => '9',
+        _ => '0',
+    }
+}
+
 fn draw_shop_panel(game: &Game, sw: f32) {
     let rows = shop_buttons(game, sw);
-    let Some(first) = rows.first() else {
+    if rows.is_empty() {
         return;
+    }
+    let x0 = rows.iter().map(|b| b.rect.x).fold(f32::MAX, f32::min);
+    let x1 = rows.iter().map(|b| b.rect.right()).fold(0.0, f32::max);
+    let y1 = rows.iter().map(|b| b.rect.bottom()).fold(0.0, f32::max);
+    draw_rectangle(x0 - 12.0, 14.0, x1 - x0 + 24.0, y1 + 12.0 - 14.0, PANEL);
+    let title = match game.current_site().map(|s| s.kind) {
+        Some(SiteKind::Outpost) => "OUTPOST  (click, or press 1-0)",
+        Some(SiteKind::Base) => "YOUR BASE  (click, or press 1-0)",
+        _ => "SHOP  (click, or press 1-0)",
     };
-    let last = rows.last().map_or(first.rect, |r| r.rect);
-    draw_rectangle(
-        first.rect.x - 12.0,
-        14.0,
-        first.rect.w + 24.0,
-        last.y + last.h + 12.0 - 14.0,
-        PANEL,
-    );
-    text(
-        "SHOP  (click, or press 1-0)",
-        first.rect.x,
-        46.0,
-        26.0,
-        GOLD,
-    );
+    text(title, x0, 46.0, 26.0, GOLD);
     let mouse = Vec2::from(mouse_position());
-    for (i, b) in rows.iter().enumerate() {
+    for b in &rows {
         let hover = b.rect.contains(mouse) && b.enabled;
         let bg = match (b.enabled, hover) {
             (true, true) => Color::new(0.35, 0.3, 0.15, 1.0),
@@ -1558,7 +2469,10 @@ fn draw_shop_panel(game: &Game, sw: f32) {
             Color::new(0.5, 0.5, 0.55, 1.0)
         };
         text(
-            &format!("{}  {}", i + 1, b.label),
+            &match b.key {
+                Some(k) => format!("{}  {}", key_digit(k), b.label),
+                None => format!("   {}", b.label),
+            },
             b.rect.x + 12.0,
             b.rect.y + 29.0,
             24.0,

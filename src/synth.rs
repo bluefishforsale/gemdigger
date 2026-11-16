@@ -681,6 +681,62 @@ pub fn sfx(name: &str) -> Vec<f32> {
             drone(&mut buf, 56.0, 0.15, Wave::Sine, 4.0);
             buf = crossfade_loop(buf, 0.05);
         }
+        "laser" => {
+            buf = silence(0.55);
+            drone(&mut buf, 880.0, 0.25, Wave::Square, 24.0);
+            drone(&mut buf, 1320.0, 0.12, Wave::Sine, 12.0);
+            noise_burst(&mut buf, &mut rng, 0.0, 0.55, 0.1, 100.0, 0.6);
+            lowpass(&mut buf, 0.6);
+            buf = crossfade_loop(buf, 0.05);
+        }
+        "ion_charge" => {
+            buf = silence(0.55);
+            drone(&mut buf, 220.0, 0.3, Wave::Warm, 20.0);
+            drone(&mut buf, 330.0, 0.2, Wave::Sine, 10.0);
+            lowpass(&mut buf, 0.4);
+            buf = crossfade_loop(buf, 0.05);
+        }
+        "rocket" => {
+            buf = silence(0.8);
+            noise_burst(&mut buf, &mut rng, 0.0, 0.7, 0.8, 0.25, 0.2);
+            add(
+                &mut buf,
+                0.0,
+                Note::new(300.0, 0.5, 0.4, Wave::Saw)
+                    .sweep(900.0)
+                    .env(0.01, 0.2),
+            );
+        }
+        "ion" => {
+            buf = silence(1.4);
+            add(
+                &mut buf,
+                0.0,
+                Note::new(1600.0, 1.2, 0.5, Wave::Saw)
+                    .sweep(120.0)
+                    .env(0.003, 0.4),
+            );
+            add(
+                &mut buf,
+                0.0,
+                Note::new(80.0, 1.2, 0.6, Wave::Sine)
+                    .sweep(40.0)
+                    .env(0.003, 0.5),
+            );
+            noise_burst(&mut buf, &mut rng, 0.0, 1.0, 0.5, 0.3, 0.3);
+            lowpass(&mut buf, 0.5);
+        }
+        "ping" => {
+            buf = silence(1.6);
+            for (i, f) in [1568.0, 1568.0 * 0.5].iter().enumerate() {
+                add(
+                    &mut buf,
+                    i as f32 * 0.32,
+                    Note::new(*f, 1.2, 0.3 / (i + 1) as f32, Wave::Sine).env(0.003, 0.35),
+                );
+            }
+            echo(&mut buf, 0.18, 0.35);
+        }
         "dug" => {
             buf = silence(0.25);
             noise_burst(&mut buf, &mut rng, 0.0, 0.2, 0.7, 0.05, 0.3);
@@ -943,8 +999,29 @@ pub fn sfx(name: &str) -> Vec<f32> {
 /// Every effect name `sfx` knows, for loading them all up front.
 pub fn sfx_names() -> Vec<String> {
     let fixed = [
-        "drill", "thrust", "dug", "sell", "buy", "deny", "low_fuel", "hit", "land", "death",
-        "respawn", "rumble", "stash", "full", "clink", "craft", "fuse", "boom",
+        "ping",
+        "drill",
+        "thrust",
+        "dug",
+        "sell",
+        "buy",
+        "deny",
+        "low_fuel",
+        "hit",
+        "land",
+        "death",
+        "respawn",
+        "rumble",
+        "stash",
+        "full",
+        "clink",
+        "craft",
+        "fuse",
+        "boom",
+        "laser",
+        "ion_charge",
+        "rocket",
+        "ion",
     ];
     let mut names: Vec<String> = fixed.iter().map(|s| s.to_string()).collect();
     names.extend((0..6).map(|t| format!("pickup_{t}")));
@@ -974,7 +1051,7 @@ mod tests {
     fn loops_have_no_click_at_the_seam() {
         let mut loops: Vec<(String, Vec<f32>)> =
             (0..5).map(|b| (format!("music_{b}"), music(b))).collect();
-        loops.extend(["drill", "thrust"].map(|n| (n.to_string(), sfx(n))));
+        loops.extend(["drill", "thrust", "laser", "ion_charge"].map(|n| (n.to_string(), sfx(n))));
         for (name, buf) in loops {
             let mut steps: Vec<f32> = buf.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
             steps.sort_by(f32::total_cmp);

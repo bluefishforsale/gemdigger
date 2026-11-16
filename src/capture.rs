@@ -12,10 +12,10 @@ use std::path::Path;
 use macroquad::prelude::*;
 
 use crate::art::Art;
-use crate::game::{Game, Input, Item, POD_HALF};
-use crate::monsters::{Monster, Phase, Size};
+use crate::game::{Arsenal, Game, Input, Item, POD_HALF};
+use crate::monsters::{Kind, Monster, Phase, Size};
 use crate::render::Renderer;
-use crate::world::{Mineral, Tile};
+use crate::world::{self, Mineral, Tile};
 
 const DT: f32 = 1.0 / 60.0;
 /// Every 4th 60 Hz frame goes into the clip: 15 fps.
@@ -36,7 +36,7 @@ fn hold(left: bool, right: bool, up: bool, down: bool) -> Input {
         right,
         up,
         down,
-        bomb: false,
+        ..Input::default()
     }
 }
 
@@ -85,13 +85,13 @@ fn scenes() -> Vec<Scene> {
                 }
                 g.levels.lamp = 2;
                 g.monsters.push(Monster {
-                    size: Size::Large,
-                    x: 54.0,
-                    y: 461.0 - Size::Large.dims().1 / 2.0,
                     dir: -1.0,
-                    phase: Phase::Warning(1.2),
-                    age: 0.0,
-                    stun: 0.0,
+                    ..Monster::new(
+                        Kind::DeepOne,
+                        55.0,
+                        461.0 - Size::Huge.dims().1 / 2.0,
+                        Phase::Warning(1.2),
+                    )
                 });
             },
             input: |t| hold(false, false, t > 2.6, false),
@@ -115,6 +115,60 @@ fn scenes() -> Vec<Scene> {
             },
             secs: 4.5,
             stills: &[("bomb", 2.65)],
+        },
+        // Charging the ion cannon at a Shadow Leviathan; its health bar drops.
+        Scene {
+            setup: |g| {
+                pocket(g, 540, 30, 70);
+                g.arsenal = Arsenal {
+                    laser: true,
+                    rockets: true,
+                    ion: true,
+                };
+                g.pod.fuel = 200.0;
+                g.monsters.push(Monster {
+                    dir: -1.0,
+                    ..Monster::new(
+                        Kind::ShadowLeviathan,
+                        57.0,
+                        541.0 - Size::Huge.dims().1 / 2.0,
+                        Phase::Active,
+                    )
+                });
+            },
+            input: |t| Input {
+                ion: t > 0.2 && t < 1.8,
+                ..Input::default()
+            },
+            secs: 3.0,
+            stills: &[("ion", 1.95)],
+        },
+        // A deep outpost: a full shop in a carved cavern.
+        Scene {
+            setup: |g| {
+                let (x, floor) = world::outpost(SEED, 1).expect("outpost 1 exists");
+                g.pod.x = x as f32 + 0.5;
+                g.pod.y = floor as f32 - POD_HALF - 0.001;
+                g.money = 3400;
+                g.cargo = vec![Item::Gem(3), Item::Gem(4), Item::Gem(2)];
+            },
+            input: |_| Input::default(),
+            secs: 2.0,
+            stills: &[("outpost", 1.2)],
+        },
+        // Building a base underground.
+        Scene {
+            setup: |g| {
+                pocket(g, 330, 40, 58);
+                g.base_kits = 1;
+                g.money = 900;
+            },
+            input: |t| Input {
+                base: (t / DT).round() as i32 == 6,
+                ..Input::default()
+            },
+            secs: 3.0,
+            stills: &[("base", 1.6)],
         },
     ]
 }

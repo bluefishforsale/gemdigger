@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 /// Columns in the mine; everything outside is bedrock wall.
-pub const WIDTH: i32 = 96;
+pub const WIDTH: i32 = 512;
 /// Depth (in tiles) where each band starts: topsoil, clay, stone, deep, abyss.
 pub const BAND_STARTS: [i32; 5] = [0, 50, 150, 300, 500];
 /// Depth where each ore tier first shows up.
@@ -96,6 +96,50 @@ pub fn unit(h: u64) -> f32 {
     (h >> 40) as f32 / (1u64 << 24) as f32
 }
 
+/// Rows between deep outposts, on average; each is 150 to 250 below the last.
+pub const OUTPOST_SPACING: i32 = 200;
+/// Half the width of an outpost's cavern, in tiles.
+pub const OUTPOST_HALF: i32 = 4;
+const OUTPOST_HEIGHT: i32 = 4;
+
+/// Where outpost `k` (1 = shallowest) stands: its center column and the row
+/// it's built on. NOTE: x follows a slow wave plus a little jitter so each
+/// outpost is at most 59 columns sideways from the one above; that keeps the
+/// next one in reach on a single tank. Pure function of the seed, so any tile
+/// can ask in constant time.
+pub fn outpost(seed: u64, k: i32) -> Option<(i32, i32)> {
+    if k < 1 {
+        return None;
+    }
+    let h = hash(seed, k, 0, 40);
+    let phase = unit(hash(seed, 0, 0, 41)) * std::f32::consts::TAU;
+    let wave = 135.0 * (0.35 * k as f32 + phase).sin();
+    let jitter = (h % 13) as i32 - 6;
+    let x = WIDTH / 2 + wave as i32 + jitter;
+    let y = OUTPOST_SPACING * k + ((h >> 16) % 51) as i32 - 25;
+    Some((x, y))
+}
+
+/// The outposts whose caverns could reach row `y`.
+pub fn outposts_near(seed: u64, y: i32) -> impl Iterator<Item = (i32, i32)> {
+    let k = (y as f32 / OUTPOST_SPACING as f32).round() as i32;
+    (k - 1..=k + 1).filter_map(move |k| outpost(seed, k))
+}
+
+/// Whether (x, y) is an outpost's floor, which never breaks.
+pub fn is_outpost_floor(seed: u64, x: i32, y: i32) -> bool {
+    outposts_near(seed, y).any(|(ox, oy)| {
+        (ox - OUTPOST_HALF..ox + OUTPOST_HALF).contains(&x) && (oy..=oy + 1).contains(&y)
+    })
+}
+
+fn in_outpost_cavern(seed: u64, x: i32, y: i32) -> bool {
+    outposts_near(seed, y).any(|(ox, oy)| {
+        (ox - OUTPOST_HALF..ox + OUTPOST_HALF).contains(&x)
+            && (oy - OUTPOST_HEIGHT..oy).contains(&y)
+    })
+}
+
 fn in_tunnel(seed: u64, x: i32, y: i32) -> bool {
     if y < 40 {
         return false;
@@ -129,6 +173,12 @@ fn generate(seed: u64, x: i32, y: i32) -> Tile {
         return Tile::Wall;
     }
     if y < 2 {
+        return Tile::Dirt;
+    }
+    if in_outpost_cavern(seed, x, y) {
+        return Tile::Air;
+    }
+    if is_outpost_floor(seed, x, y) {
         return Tile::Dirt;
     }
     if in_tunnel(seed, x, y) {
@@ -302,6 +352,38 @@ mod tests {
             }
         }
         assert_eq!(seen, [true; 3], "some mineral never generated");
+    }
+
+    /// Each outpost is 150-250 rows below the last and at most 59 columns
+    /// sideways, so one tank always reaches the next; and its cavern is open.
+    #[test]
+    fn outposts_stay_in_reach_of_each_other() {
+        for seed in 0..20 {
+            let w = World::new(seed);
+            let mut last = (WIDTH / 2, 0);
+            for k in 1..60 {
+                let (x, y) = outpost(seed, k).unwrap();
+                let (dx, dy) = ((x - last.0).abs(), y - last.1);
+                assert!(
+                    k == 1 || (150..=250).contains(&dy),
+                    "seed {seed} outpost {k}: {dy} rows below the last"
+                );
+                assert!(
+                    k == 1 || dx <= 59,
+                    "seed {seed} outpost {k}: {dx} columns sideways"
+                );
+                assert!(
+                    (OUTPOST_HALF..WIDTH - OUTPOST_HALF).contains(&x),
+                    "outpost {k} at x={x} off the map"
+                );
+                assert_eq!(w.get(x, y - 1), Tile::Air, "outpost {k} cavern not open");
+                assert!(
+                    is_outpost_floor(seed, x, y),
+                    "outpost {k} floor not protected"
+                );
+                last = (x, y);
+            }
+        }
     }
 
     #[test]

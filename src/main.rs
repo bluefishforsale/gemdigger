@@ -156,6 +156,39 @@ fn store(path: Option<&PathBuf>, game: &Game, renderer: &mut Renderer) {
     }
 }
 
+/// Hides the mouse pointer while she's playing with the keyboard, and brings
+/// it back the moment the mouse moves or a menu needs it.
+struct Cursor {
+    last: Vec2,
+    shown: bool,
+}
+
+impl Cursor {
+    fn new() -> Cursor {
+        Cursor {
+            last: Vec2::from(mouse_position()),
+            shown: true,
+        }
+    }
+
+    fn update(&mut self, menu_open: bool) {
+        let now = Vec2::from(mouse_position());
+        let moved = now.distance(self.last) > 0.5;
+        self.last = now;
+        let want = if moved || menu_open {
+            true
+        } else if !get_keys_down().is_empty() {
+            false
+        } else {
+            self.shown
+        };
+        if want != self.shown {
+            show_mouse(want);
+            self.shown = want;
+        }
+    }
+}
+
 fn read_input() -> Input {
     let down = |keys: &[KeyCode]| keys.iter().any(|&k| is_key_down(k));
     Input {
@@ -164,6 +197,12 @@ fn read_input() -> Input {
         up: down(&[KeyCode::Up, KeyCode::W, KeyCode::Space]),
         down: down(&[KeyCode::Down, KeyCode::S]),
         bomb: is_key_pressed(KeyCode::B),
+        laser: is_key_down(KeyCode::F),
+        rocket: is_key_pressed(KeyCode::G),
+        ion: is_key_down(KeyCode::H),
+        base: is_key_pressed(KeyCode::P),
+        teleport: is_key_pressed(KeyCode::T),
+        ping: is_key_pressed(KeyCode::Q),
     }
 }
 
@@ -173,7 +212,7 @@ fn shop_input(game: &mut Game) {
     }
     let click = is_mouse_button_pressed(MouseButton::Left).then(|| Vec2::from(mouse_position()));
     for b in render::shop_buttons(game, screen_width()) {
-        if is_key_pressed(b.key) || click.is_some_and(|m| b.rect.contains(m)) {
+        if b.key.is_some_and(is_key_pressed) || click.is_some_and(|m| b.rect.contains(m)) {
             game.apply(b.action);
         }
     }
@@ -216,7 +255,9 @@ async fn run(save_path: Option<PathBuf>, settings_path: Option<PathBuf>, mut set
     let mut menu = Menu::new();
     let mut since_save = 0.0;
     let mut frames = 0u32;
+    let mut cursor = Cursor::new();
     loop {
+        cursor.update(menu.open);
         let choice = menu.input(&settings);
         let fullscreen_key = is_key_pressed(KeyCode::F11);
         if choice == Some(Choice::Quit) {
