@@ -25,6 +25,10 @@ pub const BOMB_POUCH: u8 = 3;
 /// Seconds from dropping a bomb to the blast.
 pub const FUSE: f32 = 2.5;
 const BLAST_HURT: f32 = 30.0;
+pub const BASE_KIT_PRICE: u64 = 1500;
+pub const MAX_BASE_KITS: u8 = 3;
+/// Bases can't be built closer than this to another place to refuel.
+const BASE_SPACING: f32 = 12.0;
 const LASER_RANGE: f32 = 6.0;
 const LASER_FUEL: f32 = 2.0;
 /// The laser cuts this much slower than the drill.
@@ -47,9 +51,9 @@ const SAFE_LANDING: f32 = 11.0;
 const TOP: f32 = -6.0;
 const EPS: f32 = 0.001;
 
-/// Whether a tile holds up the shop. Neither drill nor bomb can break these,
-/// so the shop never ends up floating over a hole.
-pub fn is_foundation(tx: i32, ty: i32) -> bool {
+/// Whether a tile holds up the surface shop. Neither drill nor bomb can break
+/// these, so the shop never ends up floating over a hole.
+fn is_shop_foundation(tx: i32, ty: i32) -> bool {
     (0..FOUNDATION_DEPTH).contains(&ty)
         && (SHOP_COLUMNS.0 as i32..SHOP_COLUMNS.1 as i32).contains(&tx)
 }
@@ -104,6 +108,10 @@ pub struct Input {
     pub rocket: bool,
     /// Held: charge the ion cannon; letting go fires it.
     pub ion: bool,
+    /// Pressed this frame: build a base here.
+    pub base: bool,
+    /// Pressed this frame: teleport (needs a second press to confirm).
+    pub teleport: bool,
 }
 
 /// A weapon bought at the shop.
@@ -238,6 +246,40 @@ pub struct Levels {
     pub reserve_tank: u8,
     pub plating: u8,
     pub glowstone: u8,
+}
+
+/// What kind of place a shop is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SiteKind {
+    Surface,
+    Outpost,
+    Base,
+}
+
+/// Anywhere with a full shop: the surface, a deep outpost, or a base she built.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Site {
+    pub kind: SiteKind,
+    /// Center column.
+    pub x: f32,
+    /// The row the building stands on.
+    pub floor: i32,
+    /// Half its width, in tiles.
+    pub half: f32,
+}
+
+impl Site {
+    /// Where the pod stands when it arrives here.
+    pub fn landing(&self) -> (f32, f32) {
+        (self.x, self.floor as f32 - POD_HALF - EPS)
+    }
+}
+
+/// A base she built underground.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Base {
+    pub x: f32,
+    pub floor: i32,
 }
 
 /// A rare, permanent bonus dropped by monsters killed with a heavy weapon.
@@ -430,6 +472,7 @@ pub enum ShopAction {
     Repair,
     Buy(Upgrade),
     BuyGun(Gun),
+    BuyBaseKit,
 }
 
 /// Something that happened this frame, for sound and visual effects.
@@ -514,6 +557,19 @@ pub enum Event {
         y: f32,
     },
     RelicFound(Relic),
+    BaseBuilt {
+        x: f32,
+        y: f32,
+    },
+    BoughtBaseKit,
+    /// First T press: waiting for the second.
+    TeleportArmed,
+    Teleported {
+        sacrificed: usize,
+    },
+    CantTeleport(&'static str),
+    /// P pressed somewhere a base can't go; says why.
+    CantBuild(&'static str),
     RocketFired,
     IonFired {
         x0: f32,
@@ -559,6 +615,10 @@ pub struct Game {
     pub arsenal: Arsenal,
     pub rockets: Vec<Rocket>,
     pub drops: Vec<RelicDrop>,
+    pub bases: Vec<Base>,
+    pub base_kits: u8,
+    /// Seconds left to press T a second time.
+    teleport_armed: f32,
     /// The laser beam this frame, if it's firing.
     pub laser: Option<Beam>,
     /// The last ion shot, while it's still fading.
@@ -594,6 +654,9 @@ impl Game {
             arsenal: Arsenal::default(),
             rockets: Vec::new(),
             drops: Vec::new(),
+            bases: Vec::new(),
+            base_kits: 0,
+            teleport_armed: 0.0,
             laser: None,
             ion_beam: None,
             ion_charge: 0.0,
@@ -616,9 +679,135 @@ impl Game {
         self.pod.y.max(0.0)
     }
 
-    pub fn at_shop(&self) -> bool {
+    /// The surface shop, the outposts near row `y`, and every base.
+    pub fn sites_near(&self, y: f32) -> Vec<Site> {
+        let mut sites = vec![Site {
+            kind: SiteKind::Surface,
+            x: (SHOP_COLUMNS.0 + SHOP_COLUMNS.1) / 2.0,
+            floor: 0,
+            half: (SHOP_COLUMNS.1 - SHOP_COLUMNS.0) / 2.0,
+        }];
+        sites.extend(
+            world::outposts_near(self.world.seed, y as i32).map(|(x, floor)| Site {
+                kind: SiteKind::Outpost,
+                x: x as f32,
+                floor,
+                half: world::OUTPOST_HALF as f32,
+            }),
+        );
+        sites.extend(self.bases.iter().map(|b| Site {
+            kind: SiteKind::Base,
+            x: b.x,
+            floor: b.floor,
+            half: 1.5,
+        }));
+        sites
+    }
+
+    /// The shop the pod is standing at, if any.
+    pub fn current_site(&self) -> Option<Site> {
         let p = &self.pod;
-        p.y < 0.5 && p.dig.is_none() && (SHOP_COLUMNS.0..SHOP_COLUMNS.1).contains(&p.x)
+        if p.dig.is_some() {
+            return None;
+        }
+        self.sites_near(p.y).into_iter().find(|s| {
+            (s.x - s.half..s.x + s.half).contains(&p.x) && (p.y - s.landing().1).abs() < 0.6
+        })
+    }
+
+    pub fn at_shop(&self) -> bool {
+        self.current_site().is_some()
+    }
+
+    /// The closest place to refuel, as the crow flies.
+    pub fn nearest_site(&self, x: f32, y: f32) -> Site {
+        let mut sites = self.sites_near(y);
+        // One bracket further each way, so the nearest above or below is in the running.
+        let reach = world::OUTPOST_SPACING as f32;
+        sites.extend(self.sites_near(y - reach));
+        sites.extend(self.sites_near(y + reach));
+        let dist = |s: &Site| {
+            let (sx, sy) = s.landing();
+            (sx - x).hypot(sy - y)
+        };
+        sites
+            .into_iter()
+            .min_by(|a, b| dist(a).total_cmp(&dist(b)))
+            .expect("the surface shop is always a site")
+    }
+
+    /// Tiles nothing may break: under the surface shop, outposts and bases.
+    pub fn is_foundation(&self, tx: i32, ty: i32) -> bool {
+        is_shop_foundation(tx, ty)
+            || world::is_outpost_floor(self.world.seed, tx, ty)
+            || self.bases.iter().any(|b| {
+                (b.floor..=b.floor + 1).contains(&ty)
+                    && (b.x - 1.5..b.x + 1.5).contains(&(tx as f32 + 0.5))
+            })
+    }
+
+    /// T twice: give up everything in the hold to jump to the nearest shop.
+    /// It's a sacrifice, so the cargo is gone, not left behind as a crate.
+    fn teleport(&mut self) {
+        if self.teleport_armed <= 0.0 {
+            self.teleport_armed = 2.0;
+            self.events.push(Event::TeleportArmed);
+            return;
+        }
+        self.teleport_armed = 0.0;
+        if self.cargo.is_empty() {
+            self.events.push(Event::CantTeleport(
+                "Your hold is empty: nothing to sacrifice",
+            ));
+            return;
+        }
+        let site = self.nearest_site(self.pod.x, self.pod.y);
+        let sacrificed = self.cargo.len();
+        self.cargo.clear();
+        let (x, y) = site.landing();
+        self.pod.x = x;
+        self.pod.y = y;
+        self.pod.vx = 0.0;
+        self.pod.vy = 0.0;
+        self.pod.dig = None;
+        self.pod.invuln = 1.5;
+        self.events.push(Event::Teleported { sacrificed });
+    }
+
+    fn deploy_base(&mut self) {
+        if self.base_kits == 0 {
+            return;
+        }
+        let p = self.pod.clone();
+        if p.y < 3.0 {
+            self.events.push(Event::CantBuild("Bases go underground"));
+            return;
+        }
+        if p.dig.is_some() || !p.grounded {
+            self.events
+                .push(Event::CantBuild("Land on solid ground first"));
+            return;
+        }
+        let floor = (p.y + POD_HALF + 0.05).floor() as i32;
+        let x0 = (p.x - 1.5).floor() as i32;
+        let x1 = (p.x + 1.5).ceil() as i32;
+        if !(x0..x1).all(|tx| self.world.get(tx, floor).is_solid()) {
+            self.events
+                .push(Event::CantBuild("Needs flat ground three tiles wide"));
+            return;
+        }
+        let crowded = self.sites_near(p.y).iter().any(|s| {
+            let (sx, sy) = s.landing();
+            (sx - p.x).hypot(sy - p.y) < BASE_SPACING
+        });
+        if crowded {
+            self.events
+                .push(Event::CantBuild("Too close to another shop"));
+            return;
+        }
+        self.base_kits -= 1;
+        self.bases.push(Base { x: p.x, floor });
+        self.events.push(Event::BaseBuilt { x: p.x, y: p.y });
     }
 
     /// What the gems in the hold sell for; minerals are kept for crafting.
@@ -666,6 +855,13 @@ impl Game {
         self.update_pod(dt, input);
         if input.bomb {
             self.drop_bomb();
+        }
+        if input.base {
+            self.deploy_base();
+        }
+        self.teleport_armed = (self.teleport_armed - dt).max(0.0);
+        if input.teleport {
+            self.teleport();
         }
         self.update_bombs(dt);
         self.update_guns(dt, input);
@@ -741,6 +937,18 @@ impl Game {
                 self.pod.hull += units;
                 self.events.push(Event::Repaired);
             }
+            ShopAction::BuyBaseKit => {
+                if self.base_kits >= MAX_BASE_KITS {
+                    return;
+                }
+                if self.money < BASE_KIT_PRICE {
+                    self.events.push(Event::CantAfford);
+                    return;
+                }
+                self.money -= BASE_KIT_PRICE;
+                self.base_kits += 1;
+                self.events.push(Event::BoughtBaseKit);
+            }
             ShopAction::BuyGun(g) => {
                 if self.arsenal.has(g) {
                     return;
@@ -801,7 +1009,7 @@ impl Game {
 
     fn try_dig(&mut self, tx: i32, ty: i32, to: (f32, f32)) -> bool {
         let tile = self.world.get(tx, ty);
-        if !tile.is_diggable() || is_foundation(tx, ty) {
+        if !tile.is_diggable() || self.is_foundation(tx, ty) {
             return false;
         }
         self.pod.dig = Some(Dig {
@@ -894,7 +1102,7 @@ impl Game {
         for ty in cy - 1..=cy + 1 {
             for tx in cx - 1..=cx + 1 {
                 let tile = self.world.get(tx, ty);
-                if matches!(tile, Tile::Air | Tile::Wall) || ty < 0 || is_foundation(tx, ty) {
+                if matches!(tile, Tile::Air | Tile::Wall) || ty < 0 || self.is_foundation(tx, ty) {
                     continue;
                 }
                 self.world.set(tx, ty, Tile::Air);
@@ -1001,7 +1209,7 @@ impl Game {
         }
         // Cutting: the same tile has to stay in the beam long enough.
         match target {
-            Some((tx, ty, tile)) if tile.is_diggable() && !is_foundation(tx, ty) => {
+            Some((tx, ty, tile)) if tile.is_diggable() && !self.is_foundation(tx, ty) => {
                 let spent = match self.laser_cut {
                     Some((cx, cy, t)) if (cx, cy) == (tx, ty) => t + dt,
                     _ => dt,
@@ -1089,7 +1297,7 @@ impl Game {
                 };
                 break;
             }
-            if tile.is_solid() && !is_foundation(tx, ty) {
+            if tile.is_solid() && !self.is_foundation(tx, ty) {
                 self.world.set(tx, ty, Tile::Air);
                 self.collect(tile, tx, ty);
             }
@@ -1258,6 +1466,15 @@ impl Game {
             dropped,
         });
         self.pod = Pod::fresh(&self.levels);
+        // Back at the base nearest to where she fell, if she's built any.
+        if let Some(b) = self.bases.iter().min_by(|a, b| {
+            (a.x - x)
+                .hypot(a.floor as f32 - y)
+                .total_cmp(&(b.x - x).hypot(b.floor as f32 - y))
+        }) {
+            self.pod.x = b.x;
+            self.pod.y = b.floor as f32 - POD_HALF - EPS;
+        }
         self.pod.invuln = 2.0;
         self.monsters.clear();
         self.shake = 1.0;
@@ -1435,6 +1652,8 @@ impl Game {
             cargo: self.cargo.clone(),
             bombs: self.bombs,
             arsenal: self.arsenal,
+            bases: self.bases.clone(),
+            base_kits: self.base_kits,
             stashes: self.stashes.clone(),
             changes: self.world.changes(),
             deaths: self.deaths,
@@ -1454,6 +1673,8 @@ impl Game {
         game.cargo = s.cargo;
         game.bombs = s.bombs.min(BOMB_POUCH);
         game.arsenal = s.arsenal;
+        game.bases = s.bases;
+        game.base_kits = s.base_kits.min(MAX_BASE_KITS);
         game.stashes = s.stashes;
         game.deaths = s.deaths;
         game.max_depth = s.max_depth;
@@ -1518,6 +1739,10 @@ pub struct SaveData {
     pub bombs: u8,
     #[serde(default)]
     pub arsenal: Arsenal,
+    #[serde(default)]
+    pub bases: Vec<Base>,
+    #[serde(default)]
+    pub base_kits: u8,
     pub stashes: Vec<Stash>,
     pub changes: Vec<(i32, i32, Tile)>,
     pub deaths: u32,
@@ -1558,6 +1783,8 @@ impl From<SaveDataV1> for SaveData {
         let gems = |tiers: Vec<u8>| tiers.into_iter().map(Item::Gem).collect();
         SaveData {
             arsenal: Arsenal::default(),
+            bases: Vec::new(),
+            base_kits: 0,
             version: SaveData::VERSION,
             seed: v1.seed,
             money: v1.money,
@@ -2296,6 +2523,130 @@ mod tests {
             "relic lost in a save round trip"
         );
         assert!(back.arsenal.ion, "guns lost in a save round trip");
+    }
+
+    fn stand_at(g: &mut Game, site: Site) {
+        let (x, y) = site.landing();
+        g.pod.x = x;
+        g.pod.y = y;
+    }
+
+    /// Deep outposts are full shops, and their floor can't be dug out.
+    #[test]
+    fn outposts_are_shops_on_solid_ground() {
+        let mut g = Game::new(3);
+        g.monster_timer = f32::INFINITY;
+        let (x, floor) = world::outpost(3, 2).unwrap();
+        let site = g
+            .sites_near(floor as f32)
+            .into_iter()
+            .find(|s| s.kind == SiteKind::Outpost && s.floor == floor)
+            .unwrap();
+        stand_at(&mut g, site);
+        assert_eq!(g.current_site().map(|s| s.kind), Some(SiteKind::Outpost));
+        run(&mut g, 1.0, down());
+        assert_eq!(g.world.get(x, floor), Tile::Dirt, "outpost floor dug out");
+    }
+
+    /// A base needs a kit and flat ground underground, then it's a shop and
+    /// the place she restarts after dying nearby.
+    #[test]
+    fn a_built_base_is_a_shop_and_a_respawn_point() {
+        let mut g = game_at_depth(400);
+        g.monster_timer = f32::INFINITY;
+        g.update(
+            DT,
+            Input {
+                base: true,
+                ..Input::default()
+            },
+        );
+        assert!(g.bases.is_empty(), "built a base without a kit");
+        g.base_kits = 1;
+        g.update(
+            DT,
+            Input {
+                base: true,
+                ..Input::default()
+            },
+        );
+        assert_eq!(g.bases.len(), 1, "kit didn't build a base");
+        assert_eq!(g.base_kits, 0);
+        assert_eq!(g.current_site().map(|s| s.kind), Some(SiteKind::Base));
+        let home = (g.pod.x, g.pod.y);
+        g.pod.y += 30.0;
+        g.die("test".into());
+        assert_eq!((g.pod.x, g.pod.y), home, "didn't respawn at the base");
+    }
+
+    /// Bases can't crowd the surface shop or each other.
+    #[test]
+    fn bases_keep_their_distance() {
+        let mut g = Game::new(3);
+        g.base_kits = 2;
+        g.update(
+            DT,
+            Input {
+                base: true,
+                ..Input::default()
+            },
+        );
+        assert!(g.bases.is_empty(), "built a base on the surface");
+        let mut g = game_at_depth(400);
+        g.base_kits = 2;
+        g.bases.push(Base {
+            x: g.pod.x + 3.0,
+            floor: 401,
+        });
+        let events = g.update(
+            DT,
+            Input {
+                base: true,
+                ..Input::default()
+            },
+        );
+        assert_eq!(g.bases.len(), 1, "built a base next to another");
+        assert!(events.iter().any(|e| matches!(e, Event::CantBuild(_))));
+    }
+
+    /// Teleporting takes two presses and a full hold, sacrifices the cargo
+    /// outright, and lands at the nearest shop.
+    #[test]
+    fn teleport_sacrifices_cargo_for_the_nearest_shop() {
+        let mut g = game_at_depth(300);
+        g.monster_timer = f32::INFINITY;
+        let tap = Input {
+            teleport: true,
+            ..Input::default()
+        };
+        g.update(DT, tap);
+        g.update(DT, tap);
+        assert_eq!(g.depth().round(), 301.0, "teleported with an empty hold");
+        g.cargo = gems(&[3, 4]);
+        g.update(DT, tap);
+        assert_eq!(g.cargo.len(), 2, "one press was enough");
+        let target = g.nearest_site(g.pod.x, g.pod.y);
+        g.update(DT, tap);
+        assert!(g.cargo.is_empty(), "cargo survived the teleport");
+        assert!(g.stashes.is_empty(), "sacrificed cargo was left as a stash");
+        assert_eq!(
+            g.current_site(),
+            Some(target),
+            "didn't land at the nearest shop"
+        );
+    }
+
+    /// Bases and kits survive a save round trip.
+    #[test]
+    fn saves_keep_bases_and_kits() {
+        let mut g = game_at_depth(400);
+        g.bases.push(Base { x: 6.5, floor: 401 });
+        g.base_kits = 2;
+        let back = Game::from_save(
+            serde_json::from_str(&serde_json::to_string(&g.to_save()).unwrap()).unwrap(),
+        );
+        assert_eq!(back.bases, g.bases);
+        assert_eq!(back.base_kits, 2);
     }
 
     /// Saving mid-dig must not put the pod inside rock on reload.

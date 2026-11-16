@@ -200,6 +200,8 @@ fn read_input() -> Input {
         laser: is_key_down(KeyCode::F),
         rocket: is_key_pressed(KeyCode::G),
         ion: is_key_down(KeyCode::H),
+        base: is_key_pressed(KeyCode::P),
+        teleport: is_key_pressed(KeyCode::T),
     }
 }
 

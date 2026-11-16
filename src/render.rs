@@ -8,8 +8,8 @@ use macroquad::rand::gen_range;
 
 use crate::art::Art;
 use crate::game::{
-    BOMB_POUCH, Event, FUSE, Game, Gun, Item, MAX_LEVEL, POD_HALF, SHOP_COLUMNS, ShopAction,
-    Upgrade,
+    BASE_KIT_PRICE, BOMB_POUCH, Event, FUSE, Game, Gun, Item, MAX_BASE_KITS, MAX_LEVEL, POD_HALF,
+    SHOP_COLUMNS, ShopAction, SiteKind, Upgrade,
 };
 use crate::monsters::{Monster, Phase, Size};
 use crate::world::Mineral;
@@ -616,6 +616,30 @@ impl Renderer {
                 );
             }
             Event::RocketFired => {}
+            Event::BaseBuilt { x, y } => {
+                self.toast("Base built! You'll restart here, and it's a full shop.");
+                self.burst(*x, *y, 40, Color::new(1.0, 0.75, 0.35, 1.0), 5.0, 0.0, true);
+            }
+            Event::BoughtBaseKit => self.toast("Base kit bought. Press P underground to build it."),
+            Event::TeleportArmed => {
+                self.toast("Press T again to sacrifice your cargo and teleport")
+            }
+            Event::Teleported { sacrificed } => {
+                self.toast(format!("Teleported! {sacrificed} items sacrificed."));
+                self.flash = self.flash.max(0.6);
+                self.cam = vec2(game.pod.x, game.pod.y) * TILE;
+                self.burst(
+                    game.pod.x,
+                    game.pod.y,
+                    50,
+                    Color::new(0.7, 0.5, 1.0, 1.0),
+                    6.0,
+                    0.0,
+                    true,
+                );
+            }
+            Event::CantTeleport(why) => self.toast(*why),
+            Event::CantBuild(why) => self.toast(*why),
             Event::RelicDropped { x, y } => {
                 self.toast("Something dropped a relic!");
                 self.burst(*x, *y, 30, GOLD, 5.0, 0.0, true);
@@ -664,6 +688,7 @@ impl Renderer {
         self.draw_sky(sw);
         self.draw_tiles(game, art, sw, sh);
         self.draw_shop(art);
+        self.draw_sites(game, art, sh);
         self.draw_stashes(game, art);
         self.draw_bombs(game);
         self.draw_rockets(game);
@@ -922,6 +947,45 @@ impl Renderer {
         // their own pass rather than breaking the tile batch at every mineral.
         for (p, m, h) in minerals {
             draw_mineral(p, m, h);
+        }
+    }
+
+    /// Deep outposts and her bases. The surface shop has its own drawing.
+    fn draw_sites(&self, game: &Game, art: &Art, sh: f32) {
+        let mid = (self.view.y + sh / 2.0) / TILE;
+        for site in game.sites_near(mid) {
+            let base = self.screen(site.x, site.floor as f32);
+            let (name, w) = match site.kind {
+                SiteKind::Surface => continue,
+                SiteKind::Outpost => ("cottage", 2.0 * site.half * TILE * 0.9),
+                SiteKind::Base => ("tent", 2.0 * site.half * TILE),
+            };
+            if base.y < -4.0 * TILE || base.y > sh + 4.0 * TILE {
+                continue;
+            }
+            // Lantern light so the place reads as safe in the dark.
+            let r = w * 0.9;
+            draw_texture_ex(
+                &self.glow,
+                base.x - r,
+                base.y - r * 1.2,
+                Color::new(1.0, 0.75, 0.4, 0.35),
+                DrawTextureParams {
+                    dest_size: Some(vec2(2.0 * r, 2.0 * r)),
+                    ..Default::default()
+                },
+            );
+            let sprite = art.get(name).or_else(|| art.get("shop"));
+            if let Some(s) = sprite {
+                let h = w * s.size().y / s.size().x;
+                s.draw(base.x - w / 2.0, base.y - h, w, h, WHITE);
+            }
+            if site.kind == SiteKind::Base
+                && let Some(fire) = art.get("campfire")
+            {
+                let fw = TILE * 0.8;
+                fire.draw(base.x + w / 2.0, base.y - fw, fw, fw, WHITE);
+            }
         }
     }
 
@@ -1759,6 +1823,13 @@ pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
         "Refuel".into(),
         money(fuel),
         fuel > 0 && game.money > 0,
+    );
+    push(
+        0,
+        ShopAction::BuyBaseKit,
+        format!("Base kit  ({}/{MAX_BASE_KITS})", game.base_kits),
+        money(BASE_KIT_PRICE),
+        game.base_kits < MAX_BASE_KITS && game.money >= BASE_KIT_PRICE,
     );
     let repair = game.repair_cost();
     push(
