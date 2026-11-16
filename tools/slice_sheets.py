@@ -372,6 +372,10 @@ MEDIUM = (
 
 
 def max_side(name: str) -> int:
+    # The sky draws the mountain ranges ~200 px tall across the whole screen;
+    # shrinking them made the sky a 5x-stretched blur. Keep the source size.
+    if name.startswith("mountains_"):
+        return 1024
     if name in BIG:
         return 256
     if name.startswith("monster_"):

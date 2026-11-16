@@ -1065,7 +1065,7 @@ impl Renderer {
         self.draw_clouds(art, sw, ground, 0.04, 5.0, 0.9, 7, 11);
         // Far to near: each layer moves a little more with the camera than the
         // last. Painted mountains when the art is there, drawn ridges otherwise.
-        if !self.draw_strip(art, "mountains_far", sw, ground + 6.0, 250.0, 0.08) {
+        if !self.draw_strip(art, "mountains_far", sw, ground + 6.0, 200.0, 0.08) {
             self.draw_ridge(
                 art,
                 sw,
@@ -1078,7 +1078,7 @@ impl Renderer {
             );
         }
         self.draw_clouds(art, sw, ground, 0.12, 11.0, 0.6, 5, 12);
-        if !self.draw_strip(art, "mountains_near", sw, ground + 6.0, 170.0, 0.22) {
+        if !self.draw_strip(art, "mountains_near", sw, ground + 6.0, 150.0, 0.22) {
             self.draw_ridge(
                 art,
                 sw,
@@ -1118,10 +1118,23 @@ impl Renderer {
             return false;
         };
         let w = height * s.size().x / s.size().y;
-        let mut x = -(self.view.x * parallax).rem_euclid(w);
+        // NOTE: the painting isn't made to repeat, so every other copy is
+        // mirrored: each edge then meets its own reflection, with no seam.
+        let scroll = self.view.x * parallax;
+        let mut i = (scroll / w).floor() as i64;
+        let mut x = i as f32 * w - scroll;
         while x < sw {
-            s.draw(x, bottom - height, w + 1.0, height, WHITE);
+            s.draw_ex(
+                x,
+                bottom - height,
+                w + 1.0,
+                height,
+                WHITE,
+                i.rem_euclid(2) == 1,
+                0.0,
+            );
             x += w;
+            i += 1;
         }
         true
     }
