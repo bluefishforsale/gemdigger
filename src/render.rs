@@ -54,6 +54,8 @@ struct Particle {
 struct Toast {
     text: String,
     age: f32,
+    /// How many times this same message arrived in a row.
+    count: u32,
 }
 
 /// A clickable row in the shop panel.
@@ -367,7 +369,10 @@ fn decor_sprite<'a>(art: &'a Art, name: &str, h: u64) -> Option<crate::art::Spri
 
 /// How dark the deep is (0 = daylight) at a depth in tiles.
 fn darkness(depth: f32) -> f32 {
-    ((depth - 10.0) / 350.0).clamp(0.0, 1.0).powf(0.8) * 0.96
+    let deep = ((depth - 10.0) / 350.0).clamp(0.0, 1.0).powf(0.8) * 0.96;
+    // NOTE: a hard edge at the shaft mouth: daylight stops the moment she's
+    // below the surface, so the shop above reads as the one lit room.
+    if depth < 0.6 { 0.0 } else { deep.max(0.3) }
 }
 
 /// How far the pod can see, in tiles.
@@ -579,9 +584,19 @@ impl Renderer {
     }
 
     pub fn toast(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        // The same message again just bumps a counter instead of stacking.
+        if let Some(last) = self.toasts.last_mut()
+            && last.text == text
+        {
+            last.count += 1;
+            last.age = 0.0;
+            return;
+        }
         self.toasts.push(Toast {
-            text: text.into(),
+            text,
             age: 0.0,
+            count: 1,
         });
         if self.toasts.len() > 4 {
             self.toasts.remove(0);
@@ -777,7 +792,18 @@ impl Renderer {
                     Item::Mineral(_) => self.toast(format!("+1 {}  (for bombs)", item.name())),
                 }
             }
-            Event::CargoFull => self.toast("Cargo hold is full! Fly up and sell at the shop."),
+            Event::LeftBehind(items) => {
+                let names: Vec<&str> = items.iter().take(5).map(|i| i.name()).collect();
+                let more = if items.len() > 5 { ", ..." } else { "" };
+                self.toast(format!(
+                    "Hold full. Left behind: {}{more}",
+                    names.join(", ")
+                ));
+            }
+            Event::CantBomb(why) => self.toast(*why),
+            Event::Towed => {
+                self.cam = vec2(game.pod.x, game.pod.y) * TILE;
+            }
             Event::Landed { .. } => {
                 let p = &game.pod;
                 self.burst(
@@ -1756,6 +1782,7 @@ impl Renderer {
 
         self.draw_decor_glow(game, sw, sh);
         self.draw_beams(game);
+        self.draw_loose(game);
         self.draw_relic_drops(game, art);
         self.draw_health_bars(game);
 
@@ -1830,6 +1857,35 @@ impl Renderer {
     }
 
     /// Relics glow over the dark so a drop is never lost in it.
+    /// Things the hold had no room for, glinting where they were dug out.
+    fn draw_loose(&self, game: &Game) {
+        for (i, l) in game.loose.iter().enumerate() {
+            let p = self.screen(l.x, l.y);
+            let pulse = 0.7 + 0.3 * (self.t * 3.0 + i as f32).sin();
+            let c = item_color(l.item);
+            let r = TILE * 0.5 * pulse;
+            draw_texture_ex(
+                &self.glow,
+                p.x - r,
+                p.y - r,
+                with_alpha(c, 0.7),
+                DrawTextureParams {
+                    dest_size: Some(vec2(2.0 * r, 2.0 * r)),
+                    ..Default::default()
+                },
+            );
+            draw_poly(p.x, p.y, 6, TILE * 0.18, self.t * 40.0, c);
+            draw_poly(
+                p.x,
+                p.y,
+                6,
+                TILE * 0.08,
+                self.t * 40.0,
+                with_alpha(WHITE, 0.9),
+            );
+        }
+    }
+
     fn draw_relic_drops(&self, game: &Game, art: &Art) {
         for (i, d) in game.drops.iter().enumerate() {
             let bob = (self.t * 3.0 + i as f32).sin() * 4.0;
@@ -2205,17 +2261,8 @@ impl Renderer {
             draw_rectangle_lines(tx, by, 200.0, 18.0, 2.0, Color::new(0.0, 0.0, 0.0, 0.6));
         };
         let fuel = game.pod.fuel / game.levels.fuel_max();
-        let low = fuel < 0.2 && (self.t * 4.0).sin() > 0.0;
         icon("icon_fuel", 2.0);
-        bar(
-            2.0,
-            fuel,
-            if low {
-                RED
-            } else {
-                Color::new(1.0, 0.6, 0.15, 1.0)
-            },
-        );
+        bar(2.0, fuel, self.fuel_color(game));
         icon("icon_hull", 3.0);
         let hull = game.pod.hull / game.levels.hull_max();
         bar(
@@ -2302,6 +2349,28 @@ impl Renderer {
 
     /// Messages along the top, or, while a shop menu fills the top right,
     /// along the bottom (clear of the radar) so they never print over it.
+    /// The fuel bar warms to red and flashes ever faster as the tank nears the
+    /// point of no return: the fuel it takes to reach the nearest shop.
+    fn fuel_color(&self, game: &Game) -> Color {
+        let orange = Color::new(1.0, 0.6, 0.15, 1.0);
+        let red = Color::new(0.95, 0.12, 0.1, 1.0);
+        if game.depth() < 1.0 {
+            return orange;
+        }
+        // margin 1.0 is the point of no return.
+        let margin = game.pod.fuel / game.return_fuel().max(0.1);
+        let color = mix(orange, red, (2.0 - margin).clamp(0.0, 1.0));
+        if margin >= 1.5 {
+            return color;
+        }
+        let hz = 1.5 + 8.5 * ((1.5 - margin) / 0.5).clamp(0.0, 1.0);
+        if (self.t * hz * TAU).sin() > 0.0 {
+            color
+        } else {
+            mix(red, BLACK, 0.55)
+        }
+    }
+
     fn draw_toasts(&self, sw: f32, sh: f32, shop_open: bool) {
         let (cx, top) = if shop_open {
             (
@@ -2316,7 +2385,8 @@ impl Renderer {
             let rise = (t.age * 6.0).min(6.0);
             let y = top + i as f32 * 34.0 - rise;
             if shop_open {
-                let w = measure_text(&t.text, None, 28, 1.0).width;
+                let w = measure_text(&t.text, None, 28, 1.0).width
+                    + if t.count > 1 { 50.0 } else { 0.0 };
                 draw_rectangle(
                     cx - w / 2.0 - 10.0,
                     y - 24.0,
@@ -2325,7 +2395,12 @@ impl Renderer {
                     with_alpha(PANEL, a),
                 );
             }
-            text_centered(&t.text, cx, y, 28.0, with_alpha(WHITE, a));
+            let line = if t.count > 1 {
+                format!("{}  x{}", t.text, t.count)
+            } else {
+                t.text.clone()
+            };
+            text_centered(&line, cx, y, 28.0, with_alpha(WHITE, a));
         }
     }
 }
