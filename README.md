@@ -10,7 +10,8 @@ A cozy-to-creepy digging game. Drill down, collect gems, sell them at the shop, 
 |---|---|
 | ![The shop](media/shop.png) | ![The surface](media/surface.png) |
 | ![Digging for gems](media/digging.png) | ![Something in the dark](media/deep.png) |
-| ![A bomb going off](media/bomb.png) | |
+| ![A bomb going off](media/bomb.png) | ![The ion cannon](media/ion.png) |
+| ![A deep outpost](media/outpost.png) | ![A base you built](media/base.png) |
 
 ## Installation
 
@@ -27,20 +28,42 @@ Drive with the arrow keys or WASD. Push into the ground to dig sideways or down,
 
 The deeper you go, the darker and stranger it gets. Monsters live down there. You always get a warning first, a rumble and a shaking screen. They only move side to side, so flying straight up always gets you away.
 
-Losing the pod isn't the end: you start again at the shop with your money and upgrades. The gems you were carrying stay where you fell, and an arrow points the way back to them.
+Bigger monsters take more hits, and a health bar shows how the fight is going. The biggest only feel bombs and the ion cannon, so sometimes the right move is still to fly. Killing a monster with a bomb, rocket or the ion cannon can drop a relic, a permanent bonus that goes past the shop's max level.
 
-At the shop, click a row or press 1 to 0. ESC opens settings, and B drops a bomb.
+Every couple of hundred meters down there's an outpost, a full shop in a cavern, and you can buy base kits to build your own. The radar in the corner and an arrow on the screen edge point you to the nearest one.
+
+Losing the pod isn't the end: you start again at your nearest base, or the surface, with your money and upgrades. The gems you were carrying stay where you fell, and an arrow points the way back to them.
+
+| Key | What it does |
+|---|---|
+| Arrows or WASD | Drive, dig, and fly (up or space) |
+| 1 to 0, or click | Buy and sell at a shop |
+| B | Drop a bomb |
+| F (hold) | Laser |
+| G | Rocket |
+| H (hold, then let go) | Ion cannon |
+| Q | Radar ping: shows nearby ore |
+| P | Build a base here |
+| T twice | Sacrifice your cargo to teleport to the nearest shop |
+| ESC | Settings |
 
 ## Features
 
 - An endless mine that goes down forever, with rarer gems the deeper you dig
 - Five depth zones, from sunny topsoil to a dark abyss, each with its own music
 - The light shrinks as you descend, and gems twinkle in the dark
-- Monsters that warn you before they appear, from small worms to the Deep Thing
+- Six kinds of monsters with health bars, from void spiders to the Shadow Leviathan and the Deep One
+- A laser, rockets and a charge-up ion cannon, bought at the shop
+- Rare relics dropped by monsters, permanent bonuses past the max upgrade
+- A mine 512 columns wide, with deep outposts every couple of hundred meters
+- Build your own bases: a full shop, and where you restart after a fall
+- A radar mini-map with a sonar ping for ore, and an arrow to the nearest shop
+- Teleport home by sacrificing your cargo
 - Lost cargo waits where you fell, with an arrow pointing back to it
 - Upgrades for drill, fuel tank, cargo hold, hull and lamp
 - Craft bombs from Coal, Sulfur and Potassium to blast through boulders and monsters
-- A layered sky with drifting clouds, hills, trees and birds
+- A painted sky with mountains, drifting clouds, trees and birds
+- Caves full of crystals, glowing mushrooms, bones and wandering critters
 - Saves automatically, so you always pick up where you left off
 - Settings for music, sound effects, screen shake and full screen
 

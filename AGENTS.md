@@ -26,7 +26,7 @@ A y release changes gameplay, so before tagging:
    ```bash
    cargo build --release
    ./target/release/gemdigger --capture target/capture   # opens a window for about 25 s
-   for f in shop surface digging deep bomb; do sips -Z 960 target/capture/$f.png --out media/$f.png; done
+   for f in shop surface digging deep bomb ion outpost base; do sips -Z 960 target/capture/$f.png --out media/$f.png; done
    ffmpeg -y -framerate 15 -i target/capture/frames/%05d.png -vf "scale=960:-2:flags=lanczos,format=yuv420p" -c:v libx264 -crf 26 -an -movflags +faststart media/gameplay.mp4
    # NOTE: -framerate 15 must match CLIP_EVERY in capture.rs, or the clip plays at the wrong speed.
    rm -rf target/webp && mkdir -p target/webp && ffmpeg -y -framerate 15 -i target/capture/frames/%05d.png -vf "fps=8,scale=480:-2:flags=lanczos" target/webp/%05d.png
