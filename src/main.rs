@@ -187,6 +187,22 @@ fn load_game(path: Option<&Path>) -> (Game, Option<String>) {
     }
 }
 
+/// Throws away the current mine for a freshly rolled one, keeping the old
+/// save beside the new one in case she regrets it.
+fn start_over(path: Option<&PathBuf>, game: &mut Game, renderer: &mut Renderer) {
+    if let Some(path) = path
+        && path.exists()
+        && let Err(e) = std::fs::copy(path, path.with_extension("previous.json"))
+    {
+        log::line(&format!("keeping the old save {}: {e}", path.display()));
+    }
+    *game = Game::new(new_seed());
+    *renderer = Renderer::new();
+    renderer.toast("A fresh mine. Happy digging!");
+    store(path, game, renderer);
+    log::line(&format!("new game, seed {}", game.world.seed));
+}
+
 fn store(path: Option<&PathBuf>, game: &Game, renderer: &mut Renderer) {
     let Some(path) = path else {
         return;
@@ -304,6 +320,9 @@ async fn run(save_path: Option<PathBuf>, settings_path: Option<PathBuf>, mut set
         if choice == Some(Choice::Quit) {
             store(save_path.as_ref(), &game, &mut renderer);
             break;
+        }
+        if choice == Some(Choice::NewGame) {
+            start_over(save_path.as_ref(), &mut game, &mut renderer);
         }
         if choice.is_some() || fullscreen_key {
             match choice {

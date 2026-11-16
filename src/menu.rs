@@ -13,19 +13,23 @@ pub enum Choice {
     ToggleSound,
     ToggleShake,
     ToggleFullscreen,
+    /// Throw away this mine and dig a freshly rolled one.
+    NewGame,
     Quit,
 }
 
 pub struct Menu {
     pub open: bool,
     cursor: usize,
+    /// New game was picked once; picking it again confirms.
+    armed: bool,
 }
 
 fn on_off(on: bool) -> &'static str {
     if on { "On" } else { "Off" }
 }
 
-fn rows(s: &Settings) -> [(String, Choice); 6] {
+fn rows(s: &Settings, armed: bool) -> [(String, Choice); 7] {
     [
         ("Resume".to_string(), Choice::Resume),
         (format!("Music: {}", on_off(s.music)), Choice::ToggleMusic),
@@ -40,6 +44,14 @@ fn rows(s: &Settings) -> [(String, Choice); 6] {
         (
             format!("Full screen: {}", on_off(s.fullscreen)),
             Choice::ToggleFullscreen,
+        ),
+        (
+            if armed {
+                "Erase this mine? Press again".to_string()
+            } else {
+                "New game (new map)".to_string()
+            },
+            Choice::NewGame,
         ),
         ("Save and quit".to_string(), Choice::Quit),
     ]
@@ -61,7 +73,30 @@ impl Menu {
         Menu {
             open: false,
             cursor: 0,
+            armed: false,
         }
+    }
+
+    /// Turns a picked row into what the main loop should do. NOTE: New game
+    /// wipes her progress, so it takes two picks in a row; anything else in
+    /// between (moving off it, closing the menu) disarms it.
+    pub fn pick(&mut self, choice: Choice) -> Option<Choice> {
+        if choice == Choice::NewGame && !self.armed {
+            self.armed = true;
+            return None;
+        }
+        self.armed = false;
+        if matches!(choice, Choice::Resume | Choice::NewGame) {
+            self.open = false;
+        }
+        Some(choice)
+    }
+
+    fn move_to(&mut self, cursor: usize) {
+        if cursor != self.cursor {
+            self.armed = false;
+        }
+        self.cursor = cursor;
     }
 
     /// Reads this frame's input; returns a choice when one is made.
@@ -69,22 +104,23 @@ impl Menu {
         if is_key_pressed(KeyCode::Escape) {
             self.open = !self.open;
             self.cursor = 0;
+            self.armed = false;
             return None;
         }
         if !self.open {
             return None;
         }
-        let rows = rows(s);
+        let rows = rows(s, self.armed);
         if is_key_pressed(KeyCode::Down) || is_key_pressed(KeyCode::S) {
-            self.cursor = (self.cursor + 1) % rows.len();
+            self.move_to((self.cursor + 1) % rows.len());
         }
         if is_key_pressed(KeyCode::Up) || is_key_pressed(KeyCode::W) {
-            self.cursor = (self.cursor + rows.len() - 1) % rows.len();
+            self.move_to((self.cursor + rows.len() - 1) % rows.len());
         }
         let mouse = Vec2::from(mouse_position());
         for i in 0..rows.len() {
             if row_rect(i).contains(mouse) {
-                self.cursor = i;
+                self.move_to(i);
             }
         }
         let clicked =
@@ -92,11 +128,7 @@ impl Menu {
         if !(clicked || is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::Space)) {
             return None;
         }
-        let choice = rows[self.cursor].1;
-        if choice == Choice::Resume {
-            self.open = false;
-        }
-        Some(choice)
+        self.pick(rows[self.cursor].1)
     }
 
     pub fn draw(&self, s: &Settings) {
@@ -114,10 +146,13 @@ impl Menu {
             56.0,
             WHITE,
         );
-        for (i, (label, _)) in rows(s).iter().enumerate() {
+        let rows = rows(s, self.armed);
+        for (i, (label, choice)) in rows.iter().enumerate() {
             let r = row_rect(i);
             let selected = i == self.cursor;
-            let bg = if selected {
+            let bg = if *choice == Choice::NewGame && self.armed {
+                Color::new(0.5, 0.12, 0.1, 0.95)
+            } else if selected {
                 Color::new(0.35, 0.3, 0.15, 0.95)
             } else {
                 Color::new(0.1, 0.09, 0.14, 0.9)
@@ -134,9 +169,55 @@ impl Menu {
         draw_text(
             hint,
             sw / 2.0 - hw / 2.0,
-            row_rect(5).y + 100.0,
+            row_rect(rows.len() - 1).y + 100.0,
             22.0,
             Color::new(0.75, 0.75, 0.8, 1.0),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One stray Enter must not wipe a mine she's spent hours on.
+    #[test]
+    fn new_game_needs_a_second_pick() {
+        let mut m = Menu {
+            open: true,
+            cursor: 5,
+            armed: false,
+        };
+        assert_eq!(m.pick(Choice::NewGame), None);
+        assert!(m.open);
+        assert_eq!(m.pick(Choice::NewGame), Some(Choice::NewGame));
+        assert!(!m.open, "menu stayed open over the fresh mine");
+    }
+
+    /// Arming, then wandering off and back, starts the confirm over.
+    #[test]
+    fn moving_off_new_game_disarms_it() {
+        let mut m = Menu {
+            open: true,
+            cursor: 5,
+            armed: false,
+        };
+        m.pick(Choice::NewGame);
+        m.move_to(4);
+        m.move_to(5);
+        assert_eq!(m.pick(Choice::NewGame), None);
+    }
+
+    /// Hovering the same row every frame (the mouse sits still) keeps it armed.
+    #[test]
+    fn staying_on_new_game_keeps_it_armed() {
+        let mut m = Menu {
+            open: true,
+            cursor: 5,
+            armed: false,
+        };
+        m.pick(Choice::NewGame);
+        m.move_to(5);
+        assert_eq!(m.pick(Choice::NewGame), Some(Choice::NewGame));
     }
 }

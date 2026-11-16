@@ -68,7 +68,7 @@ Losing the pod isn't the end: you start again at your nearest base, or the surfa
 - A painted sky with mountains, drifting clouds, trees and birds
 - Caves full of crystals, glowing mushrooms, bones and wandering critters
 - Saves automatically, so you always pick up where you left off
-- Settings for music, sound effects, screen shake and full screen
+- An Esc menu with settings for music, sound effects, screen shake and full screen, plus New game to start over on a freshly rolled map
 
 ## Technologies
 
