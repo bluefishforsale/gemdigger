@@ -26,6 +26,9 @@ pub const BOMB_POUCH: u8 = 3;
 pub const FUSE: f32 = 2.5;
 const BLAST_HURT: f32 = 30.0;
 pub const BASE_KIT_PRICE: u64 = 1500;
+/// Seconds a ping keeps ore lit on the radar, and the wait between pings.
+pub const PING_REVEAL: f32 = 6.0;
+const PING_COOLDOWN: f32 = 10.0;
 pub const MAX_BASE_KITS: u8 = 3;
 /// Bases can't be built closer than this to another place to refuel.
 const BASE_SPACING: f32 = 12.0;
@@ -112,6 +115,8 @@ pub struct Input {
     pub base: bool,
     /// Pressed this frame: teleport (needs a second press to confirm).
     pub teleport: bool,
+    /// Pressed this frame: sonar ping.
+    pub ping: bool,
 }
 
 /// A weapon bought at the shop.
@@ -568,6 +573,7 @@ pub enum Event {
         sacrificed: usize,
     },
     CantTeleport(&'static str),
+    Pinged,
     /// P pressed somewhere a base can't go; says why.
     CantBuild(&'static str),
     RocketFired,
@@ -619,6 +625,10 @@ pub struct Game {
     pub base_kits: u8,
     /// Seconds left to press T a second time.
     teleport_armed: f32,
+    /// Seconds the radar keeps showing ore from the last ping.
+    pub ping: f32,
+    /// Seconds until she can ping again.
+    pub ping_cooldown: f32,
     /// The laser beam this frame, if it's firing.
     pub laser: Option<Beam>,
     /// The last ion shot, while it's still fading.
@@ -657,6 +667,8 @@ impl Game {
             bases: Vec::new(),
             base_kits: 0,
             teleport_armed: 0.0,
+            ping: 0.0,
+            ping_cooldown: 0.0,
             laser: None,
             ion_beam: None,
             ion_charge: 0.0,
@@ -860,6 +872,13 @@ impl Game {
             self.deploy_base();
         }
         self.teleport_armed = (self.teleport_armed - dt).max(0.0);
+        self.ping = (self.ping - dt).max(0.0);
+        self.ping_cooldown = (self.ping_cooldown - dt).max(0.0);
+        if input.ping && self.ping_cooldown <= 0.0 {
+            self.ping = PING_REVEAL;
+            self.ping_cooldown = PING_COOLDOWN;
+            self.events.push(Event::Pinged);
+        }
         if input.teleport {
             self.teleport();
         }
@@ -2647,6 +2666,29 @@ mod tests {
         );
         assert_eq!(back.bases, g.bases);
         assert_eq!(back.base_kits, 2);
+    }
+
+    /// A ping lights the radar for a while, then has to recharge.
+    #[test]
+    fn ping_reveals_then_recharges() {
+        let mut g = game_at_depth(100);
+        let tap = Input {
+            ping: true,
+            ..Input::default()
+        };
+        let events = g.update(DT, tap);
+        assert!(events.contains(&Event::Pinged));
+        assert!(g.ping > 0.0);
+        let again = g.update(DT, tap);
+        assert!(
+            !again.contains(&Event::Pinged),
+            "pinged again with no cooldown"
+        );
+        run(&mut g, PING_COOLDOWN, Input::default());
+        assert!(
+            g.update(DT, tap).contains(&Event::Pinged),
+            "ping never recharged"
+        );
     }
 
     /// Saving mid-dig must not put the pod inside rock on reload.

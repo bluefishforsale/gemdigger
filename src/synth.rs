@@ -726,6 +726,17 @@ pub fn sfx(name: &str) -> Vec<f32> {
             noise_burst(&mut buf, &mut rng, 0.0, 1.0, 0.5, 0.3, 0.3);
             lowpass(&mut buf, 0.5);
         }
+        "ping" => {
+            buf = silence(1.6);
+            for (i, f) in [1568.0, 1568.0 * 0.5].iter().enumerate() {
+                add(
+                    &mut buf,
+                    i as f32 * 0.32,
+                    Note::new(*f, 1.2, 0.3 / (i + 1) as f32, Wave::Sine).env(0.003, 0.35),
+                );
+            }
+            echo(&mut buf, 0.18, 0.35);
+        }
         "dug" => {
             buf = silence(0.25);
             noise_burst(&mut buf, &mut rng, 0.0, 0.2, 0.7, 0.05, 0.3);
@@ -988,6 +999,7 @@ pub fn sfx(name: &str) -> Vec<f32> {
 /// Every effect name `sfx` knows, for loading them all up front.
 pub fn sfx_names() -> Vec<String> {
     let fixed = [
+        "ping",
         "drill",
         "thrust",
         "dug",

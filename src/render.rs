@@ -639,6 +639,7 @@ impl Renderer {
                 );
             }
             Event::CantTeleport(why) => self.toast(*why),
+            Event::Pinged => {}
             Event::CantBuild(why) => self.toast(*why),
             Event::RelicDropped { x, y } => {
                 self.toast("Something dropped a relic!");
@@ -701,6 +702,7 @@ impl Renderer {
         self.draw_glints(game, art, sw, sh);
         self.draw_particles(true);
         self.draw_stash_arrows(game, sw, sh);
+        self.draw_radar(game, sw, sh);
         if self.flash > 0.0 {
             draw_rectangle(
                 0.0,
@@ -1535,64 +1537,178 @@ impl Renderer {
         }
     }
 
-    fn draw_stash_arrows(&self, game: &Game, sw: f32, sh: f32) {
+    /// An arrow on the screen edge pointing at something off screen, labelled.
+    fn edge_arrow(&self, game: &Game, target: Vec2, color: Color, label: &str, sw: f32, sh: f32) {
         let from = self.screen(game.pod.x, game.pod.y);
         let margin = 56.0;
+        let to = self.screen(target.x, target.y);
+        if to.x > margin && to.x < sw - margin && to.y > margin && to.y < sh - margin {
+            return;
+        }
+        let dir = (to - from).normalize_or_zero();
+        if dir == Vec2::ZERO {
+            return;
+        }
+        // Where the line from the pod to the target crosses the inset screen edge.
+        let tx = if dir.x > 0.0 {
+            (sw - margin - from.x) / dir.x
+        } else if dir.x < 0.0 {
+            (margin - from.x) / dir.x
+        } else {
+            f32::INFINITY
+        };
+        let ty = if dir.y > 0.0 {
+            (sh - margin - from.y) / dir.y
+        } else if dir.y < 0.0 {
+            (margin - from.y) / dir.y
+        } else {
+            f32::INFINITY
+        };
+        let at = from + dir * tx.min(ty).max(0.0);
+        let pulse = 0.75 + 0.25 * (self.t * 4.0).sin();
+        let size = 22.0 * pulse.max(0.8);
+        let perp = vec2(-dir.y, dir.x);
+        draw_texture_ex(
+            &self.glow,
+            at.x - 40.0,
+            at.y - 40.0,
+            with_alpha(color, 0.5 * pulse),
+            DrawTextureParams {
+                dest_size: Some(vec2(80.0, 80.0)),
+                ..Default::default()
+            },
+        );
+        draw_triangle(
+            at + dir * size,
+            at - dir * size * 0.6 + perp * size * 0.7,
+            at - dir * size * 0.6 - perp * size * 0.7,
+            color,
+        );
+        let dist = (target.x - game.pod.x).hypot(target.y - game.pod.y).round();
+        let label = format!("{label} {dist} m");
+        let lw = measure_text(&label, None, 20, 1.0).width;
+        let lx = (at.x - lw / 2.0).clamp(8.0, sw - lw - 8.0);
+        let ly = if dir.y > 0.0 {
+            at.y - 30.0
+        } else {
+            at.y + 40.0
+        };
+        text(&label, lx, ly, 20.0, WHITE);
+    }
+
+    fn draw_stash_arrows(&self, game: &Game, sw: f32, sh: f32) {
         for s in &game.stashes {
-            let to = self.screen(s.x, s.y);
-            if to.x > margin && to.x < sw - margin && to.y > margin && to.y < sh - margin {
-                continue;
-            }
-            let dir = (to - from).normalize_or_zero();
-            if dir == Vec2::ZERO {
-                continue;
-            }
-            // Where the line from the pod to the stash crosses the inset screen edge.
-            let tx = if dir.x > 0.0 {
-                (sw - margin - from.x) / dir.x
-            } else if dir.x < 0.0 {
-                (margin - from.x) / dir.x
-            } else {
-                f32::INFINITY
-            };
-            let ty = if dir.y > 0.0 {
-                (sh - margin - from.y) / dir.y
-            } else if dir.y < 0.0 {
-                (margin - from.y) / dir.y
-            } else {
-                f32::INFINITY
-            };
-            let at = from + dir * tx.min(ty).max(0.0);
-            let pulse = 0.75 + 0.25 * (self.t * 4.0).sin();
-            let size = 22.0 * pulse.max(0.8);
-            let perp = vec2(-dir.y, dir.x);
-            let color = Color::new(0.85, 0.55, 1.0, 1.0);
-            draw_texture_ex(
-                &self.glow,
-                at.x - 40.0,
-                at.y - 40.0,
-                with_alpha(color, 0.5 * pulse),
-                DrawTextureParams {
-                    dest_size: Some(vec2(80.0, 80.0)),
-                    ..Default::default()
-                },
+            self.edge_arrow(
+                game,
+                vec2(s.x, s.y),
+                Color::new(0.85, 0.55, 1.0, 1.0),
+                "Lost cargo",
+                sw,
+                sh,
             );
-            draw_triangle(
-                at + dir * size,
-                at - dir * size * 0.6 + perp * size * 0.7,
-                at - dir * size * 0.6 - perp * size * 0.7,
-                color,
-            );
-            let dist = (s.x - game.pod.x).hypot(s.y - game.pod.y).round();
-            let label = format!("Lost cargo {dist} m");
-            let lw = measure_text(&label, None, 20, 1.0).width;
-            let lx = (at.x - lw / 2.0).clamp(8.0, sw - lw - 8.0);
-            let ly = if dir.y > 0.0 {
-                at.y - 30.0
-            } else {
-                at.y + 40.0
+        }
+        // And the nearest place to refuel, once she's underground.
+        if game.depth() > 2.0 {
+            let site = game.nearest_site(game.pod.x, game.pod.y);
+            let (x, y) = site.landing();
+            let label = match site.kind {
+                SiteKind::Surface => "Shop",
+                SiteKind::Outpost => "Outpost",
+                SiteKind::Base => "Base",
             };
-            text(&label, lx, ly, 20.0, WHITE);
+            self.edge_arrow(
+                game,
+                vec2(x, y),
+                Color::new(0.45, 1.0, 0.55, 1.0),
+                label,
+                sw,
+                sh,
+            );
+        }
+    }
+
+    /// Bottom-right mini-map: ground around her, shops, crates, monsters and
+    /// relics. A ping (Q) lights up the ore for a few seconds.
+    fn draw_radar(&self, game: &Game, sw: f32, sh: f32) {
+        const CELL: f32 = 3.0;
+        let (w, h) = (222.0, 159.0);
+        let (x0, y0) = (sw - w - 14.0, sh - h - 14.0);
+        draw_rectangle(x0 - 4.0, y0 - 24.0, w + 8.0, h + 28.0, PANEL);
+        let label = if game.ping_cooldown > 0.0 {
+            format!("RADAR   ping in {:.0}s", game.ping_cooldown.ceil())
+        } else {
+            "RADAR   Q to ping".to_string()
+        };
+        text(&label, x0, y0 - 6.0, 18.0, Color::new(0.6, 1.0, 0.7, 1.0));
+        let (cols, rows) = ((w / CELL) as i32, (h / CELL) as i32);
+        let (px, py) = (game.pod.x.floor() as i32, game.pod.y.floor() as i32);
+        let (tx0, ty0) = (px - cols / 2, py - rows / 2);
+        let pinging = game.ping > 0.0;
+        for r in 0..rows {
+            for c in 0..cols {
+                let (tx, ty) = (tx0 + c, ty0 + r);
+                let tile = game.world.get(tx, ty);
+                let near = ((tx - px).pow(2) + (ty - py).pow(2)) <= 25 * 25;
+                let color = match tile {
+                    Tile::Air if ty < 0 => Color::new(0.2, 0.3, 0.45, 1.0),
+                    Tile::Air => Color::new(0.03, 0.03, 0.05, 1.0),
+                    Tile::Wall => Color::new(0.3, 0.26, 0.36, 1.0),
+                    Tile::Boulder => Color::new(0.45, 0.45, 0.48, 1.0),
+                    Tile::Ore(t) if pinging && near => ORE_COLORS[(t as usize).min(5)],
+                    Tile::Mineral(m) if pinging && near => mineral_color(m),
+                    _ => mix(BAND_COLORS[world::band(ty)], BLACK, 0.45),
+                };
+                draw_rectangle(
+                    x0 + c as f32 * CELL,
+                    y0 + r as f32 * CELL,
+                    CELL,
+                    CELL,
+                    color,
+                );
+            }
+        }
+        // Markers; anything off the map is pinned to its edge.
+        let to_map = |x: f32, y: f32| {
+            vec2(
+                (x0 + (x - tx0 as f32) * CELL).clamp(x0 + 3.0, x0 + w - 3.0),
+                (y0 + (y - ty0 as f32) * CELL).clamp(y0 + 3.0, y0 + h - 3.0),
+            )
+        };
+        for site in game.sites_near(game.pod.y) {
+            let (sx, sy) = site.landing();
+            let p = to_map(sx, sy);
+            draw_rectangle(p.x - 3.0, p.y - 3.0, 7.0, 7.0, GOLD);
+        }
+        for s in &game.stashes {
+            let p = to_map(s.x, s.y);
+            draw_circle(p.x, p.y, 3.0, Color::new(0.85, 0.55, 1.0, 1.0));
+        }
+        for d in &game.drops {
+            let p = to_map(d.x, d.y);
+            draw_circle(p.x, p.y, 3.0, GOLD);
+        }
+        for m in &game.monsters {
+            let p = to_map(m.x, m.y);
+            draw_circle(
+                p.x,
+                p.y,
+                2.0 + m.size.dims().0,
+                Color::new(1.0, 0.25, 0.2, 1.0),
+            );
+        }
+        let p = to_map(game.pod.x, game.pod.y);
+        let blink = 0.6 + 0.4 * (self.t * 6.0).sin();
+        draw_circle(p.x, p.y, 3.5, with_alpha(WHITE, blink));
+        if pinging {
+            // The sonar ring sweeping outward.
+            let k = 1.0 - game.ping / crate::game::PING_REVEAL;
+            draw_circle_lines(
+                p.x,
+                p.y,
+                25.0 * CELL * k.min(1.0),
+                1.5,
+                Color::new(0.6, 1.0, 0.7, 1.0 - k),
+            );
         }
     }
 
