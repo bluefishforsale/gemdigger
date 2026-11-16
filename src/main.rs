@@ -12,6 +12,7 @@ mod game;
 mod log;
 mod menu;
 mod monsters;
+mod playtest;
 mod render;
 mod save;
 mod settings;
@@ -57,6 +58,21 @@ fn main() {
             ..Default::default()
         };
         macroquad::Window::from_config(conf, bench::run());
+        return;
+    }
+    if let Some(dir) = flag_dir("--playtest") {
+        let conf = Conf {
+            window_title: "GemDigger playtest".to_string(),
+            window_width: 1280,
+            window_height: 720,
+            high_dpi: false,
+            ..Default::default()
+        };
+        macroquad::Window::from_config(conf, async move {
+            if let Err(e) = playtest::run(&dir).await {
+                log::line(&format!("{e:#}"));
+            }
+        });
         return;
     }
     if let Some(dir) = capture_dir() {
@@ -107,8 +123,13 @@ fn metal() -> Platform {
 
 /// `--capture <dir>`: render the README media instead of playing.
 fn capture_dir() -> Option<PathBuf> {
+    flag_dir("--capture")
+}
+
+/// The path after `flag` on the command line, if the flag is there.
+fn flag_dir(flag: &str) -> Option<PathBuf> {
     let args: Vec<String> = std::env::args().collect();
-    let i = args.iter().position(|a| a == "--capture")?;
+    let i = args.iter().position(|a| a == flag)?;
     args.get(i + 1).map(PathBuf::from)
 }
 

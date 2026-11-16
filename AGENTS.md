@@ -35,6 +35,10 @@ A y release changes gameplay, so before tagging:
 
    The scenes are scripted in `src/capture.rs`; add one when a new feature deserves a shot.
 
+## Playtest
+
+`./target/release/gemdigger --playtest <dir>` plays the real game with an autopilot through every feature (shop, digging, ping, laser, rockets, bombs, monster fights, relics, bases, teleport, death and respawn, save round trip), with no audio and no real save, printing PASS or FAIL per step and saving a screenshot after each. Starting money, one bomb, some cargo and the test monsters are granted, and shop purchases call `apply` directly. Run it before tagging, and look at the screenshots, not only the PASS lines.
+
 ## Releasing
 
 Bump `version` in `Cargo.toml` and merge, then push a `v*` tag. `release.yml` builds Windows and macOS, signs both, and publishes them with one `SHA256SUMS`. A tag fails before building if any signing input is missing, so nothing unsigned ships.
