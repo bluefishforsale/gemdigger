@@ -161,6 +161,9 @@ fn money(n: u64) -> String {
 }
 
 fn text(s: &str, x: f32, y: f32, size: f32, color: Color) {
+    // NOTE: whole pixels only. A label that follows something moving (the
+    // edge arrows) otherwise lands between pixels and shimmers as it travels.
+    let (x, y) = (x.round(), y.round());
     draw_text(s, x + 2.0, y + 2.0, size, with_alpha(BLACK, color.a * 0.7));
     draw_text(s, x, y, size, color);
 }
@@ -1023,6 +1026,7 @@ impl Renderer {
 
         clear_background(Color::new(0.02, 0.02, 0.04, 1.0));
         self.draw_sky(art, sw);
+        self.draw_surface_trees(game, art, sw);
         self.draw_tiles(game, art, sw, sh);
         self.draw_shop(art);
         self.draw_sites(game, art, sh);
@@ -1298,6 +1302,48 @@ impl Renderer {
             let lift = flap * 4.0 * b.size;
             draw_line(x - span, y - lift, x, y, 1.6, ink);
             draw_line(x, y, x + span, y - lift, 1.6, ink);
+        }
+    }
+
+    /// The odd tree or bush standing on the surface itself, behind the pod.
+    fn draw_surface_trees(&self, game: &Game, art: &Art, sw: f32) {
+        let ground = self.screen(0.0, 0.0).y;
+        if ground <= 0.0 {
+            return;
+        }
+        let trees = Self::variants(art, "tree");
+        let bushes = Self::variants(art, "bush");
+        if trees.is_empty() {
+            return;
+        }
+        let seed = game.world.seed;
+        let x0 = (self.view.x / TILE).floor() as i32 - 3;
+        let x1 = ((self.view.x + sw) / TILE).ceil() as i32 + 3;
+        // Clear of the shop, with room to park beside it.
+        let shop = SHOP_COLUMNS.0 as i32 - 2..SHOP_COLUMNS.1 as i32 + 2;
+        for tx in x0.max(0)..=x1.min(world::WIDTH - 1) {
+            let h = world::hash(seed, tx, 0, 77);
+            // A tree dug out from under would hang in the air.
+            if world::unit(h) > 0.13 || shop.contains(&tx) || !game.world.get(tx, 0).is_solid() {
+                continue;
+            }
+            let pick = (h >> 8) as usize % (trees.len() * 3 + bushes.len());
+            let size = world::unit(h >> 16);
+            let (sprite, th) = match trees.get(pick % trees.len()) {
+                Some(t) if pick < trees.len() * 3 => (*t, TILE * (1.5 + 1.1 * size)),
+                _ => (bushes[pick - trees.len() * 3], TILE * (0.6 + 0.3 * size)),
+            };
+            let tw = th * sprite.size().x / sprite.size().y;
+            let cx = self.screen(tx as f32 + 0.5, 0.0).x;
+            sprite.draw_ex(
+                cx - tw / 2.0,
+                ground + 4.0 - th,
+                tw,
+                th,
+                WHITE,
+                h >> 32 & 1 == 1,
+                0.0,
+            );
         }
     }
 
