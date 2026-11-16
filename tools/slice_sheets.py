@@ -38,7 +38,7 @@ def from_png(path: Path) -> np.ndarray:
     return rgba.astype(np.uint8)
 
 
-def from_white_jpeg(path: Path) -> np.ndarray:
+def from_white_jpeg(path: Path, holes: bool = True) -> np.ndarray:
     # Flood the near-white background in from the border, so white enclosed
     # by an outline (the ghost's body) stays opaque.
     rgb = np.array(Image.open(path).convert("RGB")).astype(np.float32)
@@ -51,8 +51,8 @@ def from_white_jpeg(path: Path) -> np.ndarray:
     # Enclosed holes (a lantern's ring, gaps between ribs) are paper white;
     # a white body like the ghost's is shaded, so its median sits lower.
     median = ndimage.median(lo, labels, index=np.arange(1, count + 1))
-    holes = np.flatnonzero(np.asarray(median) >= 250) + 1
-    bg = np.isin(labels, np.union1d(edge[edge > 0], holes))
+    enclosed = np.flatnonzero(np.asarray(median) >= 250) + 1 if holes else np.array([], int)
+    bg = np.isin(labels, np.union1d(edge[edge > 0], enclosed))
     # 1-2 px feather, then pull the white fringe out of the edge colours.
     a = np.minimum(ndimage.gaussian_filter((~bg).astype(np.float32), 0.8) * 1.6, 1)
     a[~bg] = np.maximum(a[~bg], ndimage.binary_erosion(~bg)[~bg])
@@ -82,6 +82,12 @@ LOADERS = {
     "underground.jpg": from_white_jpeg,
     "effects.jpg": from_dark_on_white,
 }
+
+# NOTE: light-grey smoke and dust come out as faint black puffs under the
+# darkness alpha (grey un-blended against white reads as black), invisible in
+# a dark cave. Their outlines are hard, so the flood-fill loader keeps them
+# white instead.
+FLOOD_ON_EFFECTS = ("fx_smoke_", "fx_dust_")
 
 # Components closer than this many pixels are found as one box, so loose
 # bits (particles, a lantern's ring) stay with their sprite.
@@ -423,8 +429,16 @@ def main() -> None:
     for sheet, regions in SHEETS.items():
         rgba = LOADERS[sheet](ART / sheet)
         labels, _ = detect(rgba, sheet)
+        flooded = None
         for name, box in regions.items():
-            cuts[name] = cut(rgba, labels, box)
+            if sheet == "effects.jpg" and name.startswith(FLOOD_ON_EFFECTS):
+                if flooded is None:
+                    # A puff's bright core is part of it, not a hole through it.
+                    f = from_white_jpeg(ART / sheet, holes=False)
+                    flooded = (f, detect(f, sheet)[0])
+                cuts[name] = cut(flooded[0], flooded[1], box)
+            else:
+                cuts[name] = cut(rgba, labels, box)
     groups: dict[str, list[str]] = {}
     for name in cuts:
         groups.setdefault(animation(name) or name, []).append(name)
