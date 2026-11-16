@@ -74,7 +74,38 @@ pub struct Renderer {
     t: f32,
     flash: f32,
     birds: Vec<Bird>,
+    effects: Vec<Effect>,
+    critters: Vec<Critter>,
     next_flock: f32,
+}
+
+/// A one-shot sprite animation (an explosion, a smoke puff) in world space.
+struct Effect {
+    /// Frames are `{prefix}_0`, `{prefix}_1`, ...
+    prefix: &'static str,
+    x: f32,
+    y: f32,
+    t: f32,
+    dur: f32,
+    /// Size in tiles.
+    size: f32,
+    /// Tiles per second it drifts upward.
+    rise: f32,
+    /// Plays the frames in order; otherwise holds one frame picked by `variant`.
+    animate: bool,
+    variant: usize,
+}
+
+/// A harmless little creature wandering an open cave, for life underground.
+struct Critter {
+    prefix: &'static str,
+    x: f32,
+    y: f32,
+    home: f32,
+    dir: f32,
+    phase: f32,
+    /// Fireflies and ghosts drift and glow; the rest walk the floor.
+    floats: bool,
 }
 
 /// A small bird crossing the sky, in screen space above the horizon.
@@ -367,6 +398,8 @@ impl Renderer {
             t: 0.0,
             flash: 0.0,
             birds: Vec::new(),
+            effects: Vec::new(),
+            critters: Vec::new(),
             next_flock: 4.0,
         }
     }
@@ -379,6 +412,168 @@ impl Renderer {
     /// Sends a flock across right away rather than after the usual wait.
     pub fn prime_birds(&mut self) {
         self.next_flock = 0.0;
+    }
+
+    #[allow(clippy::too_many_arguments)] // Mirrors Effect's fields.
+    fn effect(
+        &mut self,
+        prefix: &'static str,
+        x: f32,
+        y: f32,
+        dur: f32,
+        size: f32,
+        rise: f32,
+        animate: bool,
+    ) {
+        self.effects.push(Effect {
+            prefix,
+            x,
+            y,
+            t: 0.0,
+            dur,
+            size,
+            rise,
+            animate,
+            variant: gen_range(0, 16),
+        });
+    }
+
+    /// Keeps a few critters around the open caves on screen, never in the sky.
+    fn update_critters(&mut self, dt: f32, game: &Game) {
+        let (sw, sh) = (screen_width(), screen_height());
+        let (vx0, vy0) = (
+            self.cam.x / TILE - sw / TILE / 2.0,
+            self.cam.y / TILE - sh / TILE / 2.0,
+        );
+        let (vx1, vy1) = (vx0 + sw / TILE, vy0 + sh / TILE);
+        self.critters
+            .retain(|c| c.x > vx0 - 4.0 && c.x < vx1 + 4.0 && c.y > vy0 - 4.0 && c.y < vy1 + 4.0);
+        for c in &mut self.critters {
+            c.phase += dt;
+            if c.floats {
+                c.x = c.home + (c.phase * 0.6).sin() * 1.5;
+                continue;
+            }
+            let nx = c.x + c.dir * 0.6 * dt;
+            let floor_ok = game
+                .world
+                .get(nx.floor() as i32, c.y.floor() as i32 + 1)
+                .is_solid();
+            let open = game.world.get(nx.floor() as i32, c.y.floor() as i32) == Tile::Air;
+            if (nx - c.home).abs() > 2.0 || !floor_ok || !open {
+                c.dir = -c.dir;
+            } else {
+                c.x = nx;
+            }
+        }
+        if self.critters.len() >= 4 || gen_range(0.0, 1.0) > 0.02 {
+            return;
+        }
+        // Try a random open floor tile on screen.
+        let tx = gen_range(vx0 as i32, vx1 as i32 + 1);
+        let ty = gen_range((vy0 as i32).max(3), vy1 as i32 + 1);
+        if ty < 3 || game.world.get(tx, ty) != Tile::Air || !game.world.get(tx, ty + 1).is_solid() {
+            return;
+        }
+        let shallow = [
+            "critter_mole",
+            "critter_beetle",
+            "critter_leaf",
+            "critter_mushroom",
+            "critter_spider",
+        ];
+        let deep = [
+            "critter_firefly",
+            "critter_ghost",
+            "critter_golem",
+            "critter_beetle",
+            "critter_mushroom",
+        ];
+        let pool: &[&'static str] = if world::band(ty) <= 1 {
+            &shallow
+        } else {
+            &deep
+        };
+        let prefix = pool[gen_range(0, pool.len())];
+        let floats = matches!(prefix, "critter_firefly" | "critter_ghost");
+        let x = tx as f32 + 0.5;
+        self.critters.push(Critter {
+            prefix,
+            x,
+            y: ty as f32 + if floats { 0.3 } else { 0.5 },
+            home: x,
+            dir: if gen_range(0.0, 1.0) < 0.5 { -1.0 } else { 1.0 },
+            phase: gen_range(0.0, TAU),
+            floats,
+        });
+    }
+
+    fn draw_critters(&self, art: &Art) {
+        for c in &self.critters {
+            let frame = (c.phase * 3.0) as i32 % 2;
+            let Some(s) = art.get(&format!("{}_{frame}", c.prefix)) else {
+                continue;
+            };
+            let size = TILE * if c.floats { 0.55 } else { 0.7 };
+            let k = (size / s.size().x).min(size / s.size().y);
+            let (w, h) = (s.size().x * k, s.size().y * k);
+            let bob = if c.floats {
+                (c.phase * 2.0).sin() * 4.0
+            } else {
+                0.0
+            };
+            let p = self.screen(c.x, c.y);
+            let bottom = if c.floats {
+                p.y + h / 2.0
+            } else {
+                p.y + TILE * 0.5
+            };
+            s.draw_ex(
+                p.x - w / 2.0,
+                bottom - h + bob,
+                w,
+                h,
+                WHITE,
+                c.dir < 0.0,
+                0.0,
+            );
+        }
+    }
+
+    fn draw_effects(&self, art: &Art) {
+        for e in &self.effects {
+            let n = (0..16)
+                .take_while(|i| art.get(&format!("{}_{i}", e.prefix)).is_some())
+                .count();
+            if n == 0 {
+                continue;
+            }
+            let k = e.t / e.dur;
+            let frame = if e.animate {
+                ((k * n as f32) as usize).min(n - 1)
+            } else {
+                e.variant % n
+            };
+            let Some(s) = art.get(&format!("{}_{frame}", e.prefix)) else {
+                continue;
+            };
+            let size = e.size
+                * TILE
+                * if e.animate {
+                    0.7 + 0.5 * k
+                } else {
+                    0.8 + 0.4 * k
+                };
+            let a = if e.animate {
+                1.0 - k * 0.5
+            } else {
+                0.8 * (1.0 - k)
+            };
+            let r = (size / s.size().x).min(size / s.size().y);
+            let (w, h) = (s.size().x * r, s.size().y * r);
+            let p = self.screen(e.x, e.y);
+            s.draw(p.x - w / 2.0, p.y - h / 2.0, w, h, with_alpha(WHITE, a));
+        }
     }
 
     pub fn toast(&mut self, text: impl Into<String>) {
@@ -424,7 +619,13 @@ impl Renderer {
     pub fn update(&mut self, dt: f32, game: &Game, events: &[Event]) {
         self.t += dt;
         self.flash = (self.flash - dt * 1.5).max(0.0);
-        let target = vec2(game.pod.x, game.pod.y) * TILE;
+        let mut target = vec2(game.pod.x, game.pod.y) * TILE;
+        // NOTE: the shop panel covers the right ~720 px, so while shopping the
+        // camera slides right to keep the pod and building in the open space
+        // to its left instead of hidden under the menu.
+        if game.at_shop() {
+            target.x += 360.0;
+        }
         self.cam += (target - self.cam) * (1.0 - (-dt * 8.0).exp());
 
         for e in events {
@@ -523,11 +724,29 @@ impl Renderer {
             b.x += b.vx * dt;
         }
         self.birds.retain(|b| b.x > -120.0 && b.x < sw + 120.0);
+
+        for e in &mut self.effects {
+            e.t += dt;
+            e.y -= e.rise * dt;
+        }
+        self.effects.retain(|e| e.t < e.dur);
+        self.update_critters(dt, game);
     }
 
     fn react(&mut self, e: &Event, game: &Game) {
         match e {
             Event::DigStarted { x, y } => {
+                if gen_range(0.0, 1.0) < 0.35 {
+                    self.effect(
+                        "fx_dust",
+                        *x as f32 + 0.5,
+                        *y as f32 + 0.3,
+                        0.6,
+                        1.0,
+                        0.6,
+                        false,
+                    );
+                }
                 let color = tile_color(game.world.get(*x, *y), *y);
                 self.burst(*x as f32 + 0.5, *y as f32 + 0.5, 8, color, 2.5, 8.0, false);
             }
@@ -662,6 +881,19 @@ impl Renderer {
             Event::BombPlaced { .. } => self.toast("Fuse lit! Get clear!"),
             Event::Exploded { x, y } => {
                 self.flash = self.flash.max(0.35);
+                self.effect("fx_explosion", *x, *y, 0.45, 3.2, 0.0, true);
+                for i in 0..3 {
+                    let k = i as f32;
+                    self.effect(
+                        "fx_smoke",
+                        *x + (k - 1.0) * 0.6,
+                        *y - 0.3,
+                        1.6 + 0.3 * k,
+                        1.6,
+                        0.9,
+                        false,
+                    );
+                }
                 self.burst(*x, *y, 60, Color::new(1.0, 0.65, 0.2, 1.0), 9.0, 0.0, true);
                 self.burst(*x, *y, 30, Color::new(1.0, 0.95, 0.7, 1.0), 4.0, 0.0, true);
                 self.burst(
@@ -727,7 +959,7 @@ impl Renderer {
                 self.burst(game.pod.x, game.pod.y, 50, GOLD, 6.0, 0.0, true);
             }
             Event::IonFired { x0, x1, y } => {
-                self.flash = self.flash.max(0.25);
+                self.flash = self.flash.max(0.12);
                 let n = ((x1 - x0).abs() * 3.0) as usize;
                 for i in 0..n {
                     let x = x0 + (x1 - x0) * i as f32 / n.max(1) as f32;
@@ -767,6 +999,7 @@ impl Renderer {
         self.draw_shop(art);
         self.draw_sites(game, art, sh);
         self.draw_stashes(game, art);
+        self.draw_critters(art);
         self.draw_bombs(game);
         self.draw_rockets(game);
         for m in &game.monsters {
@@ -774,6 +1007,7 @@ impl Renderer {
         }
         self.draw_pod(game, art);
         self.draw_particles(false);
+        self.draw_effects(art);
         self.draw_darkness(game, sw, sh);
         self.draw_glints(game, art, sw, sh);
         self.draw_particles(true);
@@ -2126,13 +2360,6 @@ pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
         money(fuel),
         fuel > 0 && game.money > 0,
     );
-    push(
-        0,
-        ShopAction::BuyBaseKit,
-        format!("Base kit  ({}/{MAX_BASE_KITS})", game.base_kits),
-        money(BASE_KIT_PRICE),
-        game.base_kits < MAX_BASE_KITS && game.money >= BASE_KIT_PRICE,
-    );
     let repair = game.repair_cost();
     push(
         0,
@@ -2140,6 +2367,13 @@ pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
         "Repair hull".into(),
         money(repair),
         repair > 0 && game.money > 0,
+    );
+    push(
+        0,
+        ShopAction::BuyBaseKit,
+        format!("Base kit  ({}/{MAX_BASE_KITS})", game.base_kits),
+        money(BASE_KIT_PRICE),
+        game.base_kits < MAX_BASE_KITS && game.money >= BASE_KIT_PRICE,
     );
     for u in Upgrade::ALL {
         let level = game.levels.get(u);
@@ -2180,7 +2414,7 @@ pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
     let keyed = rows
         .iter()
         .enumerate()
-        .filter(|(_, b)| !matches!(b.action, ShopAction::BuyGun(_)))
+        .filter(|(_, b)| !matches!(b.action, ShopAction::BuyGun(_) | ShopAction::BuyBaseKit))
         .map(|(i, _)| i)
         .take(keys.len())
         .collect::<Vec<_>>();
@@ -2214,7 +2448,12 @@ fn draw_shop_panel(game: &Game, sw: f32) {
     let x1 = rows.iter().map(|b| b.rect.right()).fold(0.0, f32::max);
     let y1 = rows.iter().map(|b| b.rect.bottom()).fold(0.0, f32::max);
     draw_rectangle(x0 - 12.0, 14.0, x1 - x0 + 24.0, y1 + 12.0 - 14.0, PANEL);
-    text("SHOP  (click, or press 1-0)", x0, 46.0, 26.0, GOLD);
+    let title = match game.current_site().map(|s| s.kind) {
+        Some(SiteKind::Outpost) => "OUTPOST  (click, or press 1-0)",
+        Some(SiteKind::Base) => "YOUR BASE  (click, or press 1-0)",
+        _ => "SHOP  (click, or press 1-0)",
+    };
+    text(title, x0, 46.0, 26.0, GOLD);
     let mouse = Vec2::from(mouse_position());
     for b in &rows {
         let hover = b.rect.contains(mouse) && b.enabled;
