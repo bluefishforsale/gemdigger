@@ -409,6 +409,10 @@ def shrink(img: Image.Image, side: int) -> Image.Image:
     return img.resize(size, Image.Resampling.LANCZOS)
 
 
+# Columns trimmed off each end of a range before it is enlarged.
+EDGE = 4
+
+
 def enlarge(img: Image.Image) -> Image.Image:
     """Doubles a painting and sharpens it, for art drawn larger than it was painted.
 
@@ -416,11 +420,19 @@ def enlarge(img: Image.Image) -> Image.Image:
     Retina screen. Left to the GPU that is a 2.7x bilinear stretch, which reads
     as blur; Lanczos plus an unsharp mask keeps the edges of the brushwork.
     """
+    # NOTE: the sky tiles these edge to edge, and a cut edge's outermost
+    # columns are half transparent: left on, they show as a line of sky
+    # between two copies.
+    img = img.crop((EDGE, 0, img.width - EDGE, img.height))
     size = (img.width * 2, img.height * 2)
     # NOTE: resize premultiplied, or the transparent black around the range
     # bleeds into its outline as a dark fringe.
     big = img.convert("RGBa").resize(size, Image.Resampling.LANCZOS).convert("RGBA")
-    rgb = big.convert("RGB").filter(
+    # NOTE: sharpen over colour bled out past the outline. Against transparent
+    # black the mask overshoots and draws a bright rim around the whole range.
+    rgba = np.array(big)
+    _, (iy, ix) = ndimage.distance_transform_edt(rgba[..., 3] == 0, return_indices=True)
+    rgb = Image.fromarray(rgba[iy, ix, :3]).filter(
         ImageFilter.UnsharpMask(radius=1.6, percent=140, threshold=2)
     )
     return Image.merge("RGBA", (*rgb.split(), big.getchannel("A")))

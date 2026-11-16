@@ -121,6 +121,26 @@ fn metal() -> Platform {
     }
 }
 
+/// Tells the OpenGL context to pick its drawable up again, as a resize does.
+///
+/// NOTE: miniquad attaches the context to the view before the window is on
+/// screen, and on a Retina display the fresh window flickers at 60 Hz until
+/// its first resize (going full screen and back cured it). The resize path's
+/// lasting effect is this one call, so make it ourselves once the window is up.
+#[cfg(target_os = "macos")]
+fn refresh_gl_surface() {
+    use macroquad::miniquad::native::apple::frameworks::{Object, class, msg_send, sel, sel_impl};
+    // SAFETY: main thread, where the context was made current. A nil context
+    // (Metal) takes the message and does nothing.
+    unsafe {
+        let ctx: *mut Object = msg_send![class!(NSOpenGLContext), currentContext];
+        let () = msg_send![ctx, update];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn refresh_gl_surface() {}
+
 /// `--capture <dir>`: render the README media instead of playing.
 fn capture_dir() -> Option<PathBuf> {
     flag_dir("--capture")
@@ -349,6 +369,9 @@ async fn run(save_path: Option<PathBuf>, settings_path: Option<PathBuf>, mut set
         }
         next_frame().await;
         frames += 1;
+        if frames == 1 || frames == 30 {
+            refresh_gl_surface();
+        }
         if frames == 1 || frames == 120 {
             log::gl_errors(&format!("frame {frames}"));
         }
