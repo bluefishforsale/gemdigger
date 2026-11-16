@@ -197,6 +197,9 @@ fn read_input() -> Input {
         up: down(&[KeyCode::Up, KeyCode::W, KeyCode::Space]),
         down: down(&[KeyCode::Down, KeyCode::S]),
         bomb: is_key_pressed(KeyCode::B),
+        laser: is_key_down(KeyCode::F),
+        rocket: is_key_pressed(KeyCode::G),
+        ion: is_key_down(KeyCode::H),
     }
 }
 
@@ -206,7 +209,7 @@ fn shop_input(game: &mut Game) {
     }
     let click = is_mouse_button_pressed(MouseButton::Left).then(|| Vec2::from(mouse_position()));
     for b in render::shop_buttons(game, screen_width()) {
-        if is_key_pressed(b.key) || click.is_some_and(|m| b.rect.contains(m)) {
+        if b.key.is_some_and(is_key_pressed) || click.is_some_and(|m| b.rect.contains(m)) {
             game.apply(b.action);
         }
     }

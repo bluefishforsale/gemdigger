@@ -13,7 +13,7 @@ use macroquad::prelude::*;
 
 use crate::art::Art;
 use crate::game::{Game, Input, Item, POD_HALF};
-use crate::monsters::{Monster, Phase, Size};
+use crate::monsters::{Kind, Monster, Phase, Size};
 use crate::render::Renderer;
 use crate::world::{Mineral, Tile};
 
@@ -36,7 +36,7 @@ fn hold(left: bool, right: bool, up: bool, down: bool) -> Input {
         right,
         up,
         down,
-        bomb: false,
+        ..Input::default()
     }
 }
 
@@ -85,13 +85,13 @@ fn scenes() -> Vec<Scene> {
                 }
                 g.levels.lamp = 2;
                 g.monsters.push(Monster {
-                    size: Size::Large,
-                    x: 54.0,
-                    y: 461.0 - Size::Large.dims().1 / 2.0,
                     dir: -1.0,
-                    phase: Phase::Warning(1.2),
-                    age: 0.0,
-                    stun: 0.0,
+                    ..Monster::new(
+                        Kind::of_size(Size::Large),
+                        54.0,
+                        461.0 - Size::Large.dims().1 / 2.0,
+                        Phase::Warning(1.2),
+                    )
                 });
             },
             input: |t| hold(false, false, t > 2.6, false),

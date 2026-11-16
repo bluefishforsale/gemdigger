@@ -62,13 +62,19 @@ impl Size {
         }
     }
 
-    pub fn name(self) -> &'static str {
+    /// Hit points at full health.
+    pub fn max_hp(self) -> f32 {
         match self {
-            Size::Small => "a cave worm",
-            Size::Medium => "a shadow bat",
-            Size::Large => "a rock crawler",
-            Size::Huge => "the Deep Thing",
+            Size::Small => 3.0,
+            Size::Medium => 8.0,
+            Size::Large => 20.0,
+            Size::Huge => 60.0,
         }
+    }
+
+    /// The biggest only feel bombs and the ion cannon.
+    pub fn immune_to(self, weapon: Weapon) -> bool {
+        self == Size::Huge && matches!(weapon, Weapon::Laser | Weapon::Rocket)
     }
 
     /// Relative chance of this size appearing at a depth (in tiles).
@@ -94,7 +100,12 @@ pub enum Phase {
 /// One monster. `y` never changes after spawning.
 #[derive(Clone, Debug)]
 pub struct Monster {
+    pub kind: Kind,
     pub size: Size,
+    /// Hit points left; at zero it dies.
+    pub hp: f32,
+    /// Counts down after a hit that couldn't hurt it, so the health bar can say why.
+    pub immune_flash: f32,
     pub x: f32,
     pub y: f32,
     pub dir: f32,
@@ -104,7 +115,135 @@ pub struct Monster {
     pub stun: f32,
 }
 
+/// Which creature this is. Each belongs to one size tier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    VoidSpider,
+    AncientWorm,
+    CrystalGolem,
+    MossTitan,
+    ShadowLeviathan,
+    DeepOne,
+}
+
+impl Kind {
+    pub fn size(self) -> Size {
+        match self {
+            Kind::VoidSpider => Size::Small,
+            Kind::AncientWorm => Size::Medium,
+            Kind::CrystalGolem | Kind::MossTitan => Size::Large,
+            Kind::ShadowLeviathan | Kind::DeepOne => Size::Huge,
+        }
+    }
+
+    /// The usual creature for a size tier.
+    pub fn of_size(size: Size) -> Kind {
+        match size {
+            Size::Small => Kind::VoidSpider,
+            Size::Medium => Kind::AncientWorm,
+            Size::Large => Kind::CrystalGolem,
+            Size::Huge => Kind::DeepOne,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::VoidSpider => "a void spider",
+            Kind::AncientWorm => "an ancient worm",
+            Kind::CrystalGolem => "a crystal golem",
+            Kind::MossTitan => "a moss titan",
+            Kind::ShadowLeviathan => "the Shadow Leviathan",
+            Kind::DeepOne => "the Deep One",
+        }
+    }
+
+    /// Sprite name prefix; frames are `{prefix}_0` to `{prefix}_7`.
+    pub fn sprite(self) -> &'static str {
+        match self {
+            Kind::VoidSpider => "monster_void_spider",
+            Kind::AncientWorm => "monster_ancient_worm",
+            Kind::CrystalGolem => "monster_crystal_golem",
+            Kind::MossTitan => "monster_moss_titan",
+            Kind::ShadowLeviathan => "monster_shadow_leviathan",
+            Kind::DeepOne => "monster_deep_one",
+        }
+    }
+}
+
+/// What hit a monster. Damage is per hit, except the laser's, which is per second.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Weapon {
+    Laser,
+    Rocket,
+    Bomb,
+    Ion,
+}
+
+impl Weapon {
+    pub fn damage(self) -> f32 {
+        match self {
+            Weapon::Laser => 4.0,
+            Weapon::Rocket => 8.0,
+            Weapon::Bomb => 25.0,
+            Weapon::Ion => 40.0,
+        }
+    }
+
+    /// The heavy hitters, the only ones that can drop a relic.
+    pub fn is_heavy(self) -> bool {
+        matches!(self, Weapon::Rocket | Weapon::Bomb | Weapon::Ion)
+    }
+}
+
+/// What a hit did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hit {
+    Hurt,
+    Killed,
+    /// Bounced off: this weapon can't hurt this size of monster.
+    Immune,
+}
+
 impl Monster {
+    pub fn new(kind: Kind, x: f32, y: f32, phase: Phase) -> Monster {
+        let size = kind.size();
+        Monster {
+            kind,
+            size,
+            hp: size.max_hp(),
+            immune_flash: 0.0,
+            x,
+            y,
+            dir: 1.0,
+            phase,
+            age: 0.0,
+            stun: 0.0,
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.phase == Phase::Active
+    }
+
+    /// Applies `amount` of `weapon` damage.
+    pub fn hit(&mut self, weapon: Weapon, amount: f32) -> Hit {
+        if self.size.immune_to(weapon) {
+            self.immune_flash = 1.5;
+            return Hit::Immune;
+        }
+        self.hp -= amount;
+        if self.hp <= 0.0 {
+            Hit::Killed
+        } else {
+            Hit::Hurt
+        }
+    }
+
+    /// Health left, 0 to 1.
+    pub fn health(&self) -> f32 {
+        (self.hp / self.size.max_hp()).clamp(0.0, 1.0)
+    }
+
     /// Whether this monster's body overlaps a box centered at (x, y).
     pub fn touches(&self, x: f32, y: f32, half: f32) -> bool {
         // Slightly forgiving hitbox so grazes don't count.

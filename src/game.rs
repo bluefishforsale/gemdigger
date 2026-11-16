@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::monsters::{Monster, Phase, Size};
+use crate::monsters::{Hit, Kind, Monster, Phase, Size, Weapon};
 use crate::world::{self, Mineral, Tile, WIDTH, World};
 
 /// Half the pod's width and height, in tiles.
@@ -25,6 +25,16 @@ pub const BOMB_POUCH: u8 = 3;
 /// Seconds from dropping a bomb to the blast.
 pub const FUSE: f32 = 2.5;
 const BLAST_HURT: f32 = 30.0;
+const LASER_RANGE: f32 = 6.0;
+const LASER_FUEL: f32 = 2.0;
+/// The laser cuts this much slower than the drill.
+const LASER_CUT_SLOWDOWN: f32 = 1.5;
+const ROCKET_SPEED: f32 = 14.0;
+const ROCKET_FUEL: f32 = 6.0;
+/// Seconds of holding H before the ion cannon will fire.
+pub const ION_CHARGE: f32 = 1.5;
+const ION_FUEL: f32 = 15.0;
+const ION_RANGE: f32 = 14.0;
 const MONSTER_DEPTH: f32 = 60.0;
 const MAX_MONSTERS: usize = 3;
 
@@ -88,6 +98,86 @@ pub struct Input {
     pub down: bool,
     /// Pressed this frame (not held): drop a bomb.
     pub bomb: bool,
+    /// Held: fire the laser.
+    pub laser: bool,
+    /// Pressed this frame: launch a rocket.
+    pub rocket: bool,
+    /// Held: charge the ion cannon; letting go fires it.
+    pub ion: bool,
+}
+
+/// A weapon bought at the shop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gun {
+    Laser,
+    Rockets,
+    Ion,
+}
+
+impl Gun {
+    pub const ALL: [Gun; 3] = [Gun::Laser, Gun::Rockets, Gun::Ion];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Gun::Laser => "Laser (hold F)",
+            Gun::Rockets => "Rockets (G)",
+            Gun::Ion => "Ion cannon (hold H)",
+        }
+    }
+
+    pub fn price(self) -> u64 {
+        match self {
+            Gun::Laser => 800,
+            Gun::Rockets => 2000,
+            Gun::Ion => 6000,
+        }
+    }
+}
+
+/// Which guns she owns. Each is bought once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Arsenal {
+    pub laser: bool,
+    pub rockets: bool,
+    pub ion: bool,
+}
+
+impl Arsenal {
+    pub fn has(&self, g: Gun) -> bool {
+        match g {
+            Gun::Laser => self.laser,
+            Gun::Rockets => self.rockets,
+            Gun::Ion => self.ion,
+        }
+    }
+
+    fn give(&mut self, g: Gun) {
+        match g {
+            Gun::Laser => self.laser = true,
+            Gun::Rockets => self.rockets = true,
+            Gun::Ion => self.ion = true,
+        }
+    }
+}
+
+/// A horizontal beam (laser or ion) from x0 to x1 at height y, for drawing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Beam {
+    pub x0: f32,
+    pub x1: f32,
+    pub y: f32,
+    /// Seconds left on screen.
+    pub t: f32,
+}
+
+/// A rocket in flight.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rocket {
+    pub x: f32,
+    pub y: f32,
+    pub vx: f32,
+    pub life: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,14 +224,66 @@ impl Upgrade {
     }
 }
 
-/// Upgrade levels, each 0 to `MAX_LEVEL`.
+/// Upgrade levels, each 0 to `MAX_LEVEL`, plus relics found, which stack
+/// on top with no cap. Keeping relics here means every stat sees them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Levels {
     pub drill: u8,
     pub tank: u8,
     pub cargo: u8,
     pub hull: u8,
     pub lamp: u8,
+    pub overdrive: u8,
+    pub reserve_tank: u8,
+    pub plating: u8,
+    pub glowstone: u8,
+}
+
+/// A rare, permanent bonus dropped by monsters killed with a heavy weapon.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Relic {
+    Overdrive,
+    ReserveTank,
+    Plating,
+    Glowstone,
+}
+
+impl Relic {
+    pub const ALL: [Relic; 4] = [
+        Relic::Overdrive,
+        Relic::ReserveTank,
+        Relic::Plating,
+        Relic::Glowstone,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Relic::Overdrive => "Overdrive: +20% drill speed",
+            Relic::ReserveTank => "Reserve Tank: +15 fuel",
+            Relic::Plating => "Plating: +15 hull",
+            Relic::Glowstone => "Glowstone: brighter light",
+        }
+    }
+}
+
+/// A relic lying where its monster fell, waiting to be picked up.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RelicDrop {
+    pub x: f32,
+    pub y: f32,
+    pub vy: f32,
+    pub relic: Relic,
+}
+
+/// Chance a heavy-weapon kill drops a relic, by monster size.
+fn drop_chance(size: Size) -> f32 {
+    match size {
+        Size::Small => 0.25,
+        Size::Medium => 0.40,
+        Size::Large => 0.70,
+        Size::Huge => 1.0,
+    }
 }
 
 impl Levels {
@@ -167,11 +309,33 @@ impl Levels {
     }
 
     pub fn fuel_max(&self) -> f32 {
-        40.0 + 25.0 * self.tank as f32
+        40.0 + 25.0 * self.tank as f32 + 15.0 * self.reserve_tank as f32
     }
 
     pub fn hull_max(&self) -> f32 {
-        50.0 + 30.0 * self.hull as f32
+        50.0 + 30.0 * self.hull as f32 + 15.0 * self.plating as f32
+    }
+
+    fn add_relic(&mut self, r: Relic) {
+        let slot = match r {
+            Relic::Overdrive => &mut self.overdrive,
+            Relic::ReserveTank => &mut self.reserve_tank,
+            Relic::Plating => &mut self.plating,
+            Relic::Glowstone => &mut self.glowstone,
+        };
+        *slot = slot.saturating_add(1);
+    }
+
+    pub fn relics(&self) -> u32 {
+        [
+            self.overdrive,
+            self.reserve_tank,
+            self.plating,
+            self.glowstone,
+        ]
+        .iter()
+        .map(|&n| n as u32)
+        .sum()
     }
 
     pub fn cargo_cap(&self) -> usize {
@@ -179,12 +343,12 @@ impl Levels {
     }
 
     pub fn drill_speed(&self) -> f32 {
-        1.0 + 0.4 * self.drill as f32
+        (1.0 + 0.4 * self.drill as f32) * (1.0 + 0.2 * self.overdrive as f32)
     }
 
     /// Extra light radius, in tiles.
     pub fn lamp_bonus(&self) -> f32 {
-        1.0 * self.lamp as f32
+        1.0 * self.lamp as f32 + 1.0 * self.glowstone as f32
     }
 }
 
@@ -265,6 +429,7 @@ pub enum ShopAction {
     Refuel,
     Repair,
     Buy(Upgrade),
+    BuyGun(Gun),
 }
 
 /// Something that happened this frame, for sound and visual effects.
@@ -334,11 +499,25 @@ pub enum Event {
     },
     MonsterKilled {
         size: Size,
+        kind: Kind,
         x: f32,
         y: f32,
+        by: Weapon,
     },
     MonsterStunned {
         x: f32,
+        y: f32,
+    },
+    BoughtGun(Gun),
+    RelicDropped {
+        x: f32,
+        y: f32,
+    },
+    RelicFound(Relic),
+    RocketFired,
+    IonFired {
+        x0: f32,
+        x1: f32,
         y: f32,
     },
 }
@@ -377,6 +556,17 @@ pub struct Game {
     pub cargo: Vec<Item>,
     pub bombs: u8,
     pub live_bombs: Vec<Bomb>,
+    pub arsenal: Arsenal,
+    pub rockets: Vec<Rocket>,
+    pub drops: Vec<RelicDrop>,
+    /// The laser beam this frame, if it's firing.
+    pub laser: Option<Beam>,
+    /// The last ion shot, while it's still fading.
+    pub ion_beam: Option<Beam>,
+    /// Seconds H has been held.
+    pub ion_charge: f32,
+    /// The tile the laser is cutting, and how long it's been at it.
+    laser_cut: Option<(i32, i32, f32)>,
     pub stashes: Vec<Stash>,
     pub monsters: Vec<Monster>,
     pub deaths: u32,
@@ -401,6 +591,13 @@ impl Game {
             cargo: Vec::new(),
             bombs: 0,
             live_bombs: Vec::new(),
+            arsenal: Arsenal::default(),
+            rockets: Vec::new(),
+            drops: Vec::new(),
+            laser: None,
+            ion_beam: None,
+            ion_charge: 0.0,
+            laser_cut: None,
             stashes: Vec::new(),
             monsters: Vec::new(),
             deaths: 0,
@@ -471,6 +668,8 @@ impl Game {
             self.drop_bomb();
         }
         self.update_bombs(dt);
+        self.update_guns(dt, input);
+        self.update_drops(dt);
         self.update_monsters(dt);
         self.recover_stashes();
         self.check_fuel(dt);
@@ -541,6 +740,18 @@ impl Game {
                 self.money -= ((units * REPAIR_PRICE).ceil() as u64).min(self.money);
                 self.pod.hull += units;
                 self.events.push(Event::Repaired);
+            }
+            ShopAction::BuyGun(g) => {
+                if self.arsenal.has(g) {
+                    return;
+                }
+                if self.money < g.price() {
+                    self.events.push(Event::CantAfford);
+                    return;
+                }
+                self.money -= g.price();
+                self.arsenal.give(g);
+                self.events.push(Event::BoughtGun(g));
             }
             ShopAction::Buy(u) => {
                 let level = self.levels.get(u);
@@ -671,13 +882,14 @@ impl Game {
         }
         self.live_bombs.retain(|b| b.fuse > 0.0);
         for (x, y) in blasts {
-            self.explode(x, y);
+            self.explode(x, y, Weapon::Bomb);
         }
     }
 
-    /// Clears the 3x3 around the bomb (boulders too, never walls), keeps what
-    /// it can of the gems and minerals, and catches anything close.
-    fn explode(&mut self, x: f32, y: f32) {
+    /// Clears the 3x3 around a bomb or rocket (boulders too, never walls),
+    /// keeps what it can of the gems and minerals, and catches anything close.
+    /// Only a bomb can hurt the pod; a rocket fired point-blank won't.
+    fn explode(&mut self, x: f32, y: f32, weapon: Weapon) {
         let (cx, cy) = (x.floor() as i32, y.floor() as i32);
         for ty in cy - 1..=cy + 1 {
             for tx in cx - 1..=cx + 1 {
@@ -692,31 +904,243 @@ impl Game {
         self.events.push(Event::Exploded { x, y });
         self.shake = self.shake.max(1.0);
 
-        let mut killed = Vec::new();
-        for (i, m) in self.monsters.iter_mut().enumerate() {
+        self.strike(weapon, weapon.damage(), |m| {
             let (w, _) = m.size.dims();
-            if (m.x - x).hypot(m.y - y) > 2.2 + w * 0.3 {
-                continue;
-            }
-            if m.size == Size::Huge {
-                m.stun = 4.0;
-                self.events.push(Event::MonsterStunned { x: m.x, y: m.y });
-            } else {
-                killed.push(i);
-                self.events.push(Event::MonsterKilled {
-                    size: m.size,
-                    x: m.x,
-                    y: m.y,
-                });
-            }
-        }
-        for i in killed.into_iter().rev() {
-            self.monsters.remove(i);
-        }
+            (m.x - x).hypot(m.y - y) <= 2.2 + w * 0.3
+        });
 
-        if self.pod.invuln <= 0.0 && (self.pod.x - x).hypot(self.pod.y - y) < 2.0 {
+        if weapon == Weapon::Bomb
+            && self.pod.invuln <= 0.0
+            && (self.pod.x - x).hypot(self.pod.y - y) < 2.0
+        {
             self.pod.invuln = 1.0;
             self.hurt(BLAST_HURT, "Caught in your own blast");
+        }
+    }
+
+    /// Relics fall to the floor and wait; touching one claims it for good.
+    fn update_drops(&mut self, dt: f32) {
+        let (px, py) = (self.pod.x, self.pod.y);
+        let mut found = Vec::new();
+        let world = &self.world;
+        self.drops.retain_mut(|d| {
+            d.vy = (d.vy + GRAVITY * dt).min(MAX_FALL);
+            let ny = d.y + d.vy * dt;
+            let below = (ny + 0.3).floor() as i32;
+            if world.get(d.x.floor() as i32, below).is_solid() {
+                d.y = below as f32 - 0.3;
+                d.vy = 0.0;
+            } else {
+                d.y = ny;
+            }
+            if (d.x - px).hypot(d.y - py) < 0.9 {
+                found.push(d.relic);
+                return false;
+            }
+            true
+        });
+        for r in found {
+            self.levels.add_relic(r);
+            // The new headroom arrives full, like a bought upgrade.
+            match r {
+                Relic::ReserveTank => {
+                    self.pod.fuel = (self.pod.fuel + 15.0).min(self.levels.fuel_max())
+                }
+                Relic::Plating => {
+                    self.pod.hull = (self.pod.hull + 15.0).min(self.levels.hull_max())
+                }
+                _ => {}
+            }
+            self.events.push(Event::RelicFound(r));
+        }
+    }
+
+    fn update_guns(&mut self, dt: f32, input: Input) {
+        if let Some(b) = &mut self.ion_beam {
+            b.t -= dt;
+        }
+        self.ion_beam = self.ion_beam.filter(|b| b.t > 0.0);
+        self.fire_laser(dt, input.laser);
+        if input.rocket {
+            self.launch_rocket();
+        }
+        self.update_rockets(dt);
+        self.charge_ion(dt, input.ion);
+    }
+
+    /// Monsters overlapping the row band at `y` between x0 and x1.
+    fn in_beam(m: &Monster, x0: f32, x1: f32, y: f32) -> bool {
+        let (w, h) = m.size.dims();
+        let (lo, hi) = (x0.min(x1), x0.max(x1));
+        m.is_active()
+            && (m.y - y).abs() < h / 2.0 + 0.3
+            && m.x + w / 2.0 >= lo
+            && m.x - w / 2.0 <= hi
+    }
+
+    fn fire_laser(&mut self, dt: f32, held: bool) {
+        self.laser = None;
+        if !held || !self.arsenal.laser || self.pod.dig.is_some() || self.pod.fuel <= 0.0 {
+            self.laser_cut = None;
+            return;
+        }
+        self.burn(LASER_FUEL * dt);
+        let (dir, y) = (self.pod.facing, self.pod.y);
+        let x0 = self.pod.x + dir * POD_HALF;
+        let mut x1 = x0 + dir * LASER_RANGE;
+        let mut target = None;
+        for step in 1..=(LASER_RANGE * 4.0) as i32 {
+            let x = x0 + dir * step as f32 * 0.25;
+            let (tx, ty) = (x.floor() as i32, y.floor() as i32);
+            let tile = self.world.get(tx, ty);
+            if tile.is_solid() {
+                x1 = x;
+                target = Some((tx, ty, tile));
+                break;
+            }
+        }
+        // Cutting: the same tile has to stay in the beam long enough.
+        match target {
+            Some((tx, ty, tile)) if tile.is_diggable() && !is_foundation(tx, ty) => {
+                let spent = match self.laser_cut {
+                    Some((cx, cy, t)) if (cx, cy) == (tx, ty) => t + dt,
+                    _ => dt,
+                };
+                if spent >= self.dig_duration(ty, tile) * LASER_CUT_SLOWDOWN {
+                    self.world.set(tx, ty, Tile::Air);
+                    self.events.push(Event::Dug { x: tx, y: ty, tile });
+                    self.collect(tile, tx, ty);
+                    self.laser_cut = None;
+                } else {
+                    self.laser_cut = Some((tx, ty, spent));
+                }
+            }
+            _ => self.laser_cut = None,
+        }
+        self.strike(Weapon::Laser, Weapon::Laser.damage() * dt, |m| {
+            Game::in_beam(m, x0, x1, y)
+        });
+        self.laser = Some(Beam { x0, x1, y, t: 0.0 });
+    }
+
+    fn launch_rocket(&mut self) {
+        if !self.arsenal.rockets || self.pod.dig.is_some() || self.pod.fuel < ROCKET_FUEL {
+            return;
+        }
+        self.burn(ROCKET_FUEL);
+        let dir = self.pod.facing;
+        self.rockets.push(Rocket {
+            x: self.pod.x + dir * POD_HALF,
+            y: self.pod.y,
+            vx: dir * ROCKET_SPEED,
+            life: 3.0,
+        });
+        self.events.push(Event::RocketFired);
+    }
+
+    fn update_rockets(&mut self, dt: f32) {
+        let mut booms = Vec::new();
+        let world = &self.world;
+        let monsters = &self.monsters;
+        self.rockets.retain_mut(|r| {
+            r.life -= dt;
+            let nx = r.x + r.vx * dt;
+            let hits_rock = world.get(nx.floor() as i32, r.y.floor() as i32).is_solid();
+            let hits_monster = monsters
+                .iter()
+                .any(|m| m.is_active() && m.touches(nx, r.y, 0.2));
+            if hits_rock || hits_monster || r.life <= 0.0 {
+                booms.push((nx, r.y));
+                return false;
+            }
+            r.x = nx;
+            true
+        });
+        for (x, y) in booms {
+            self.explode(x, y, Weapon::Rocket);
+        }
+    }
+
+    fn charge_ion(&mut self, dt: f32, held: bool) {
+        if held && self.arsenal.ion && self.pod.dig.is_none() {
+            self.ion_charge += dt;
+            return;
+        }
+        let charged = self.ion_charge >= ION_CHARGE;
+        self.ion_charge = 0.0;
+        if !charged || self.pod.fuel < ION_FUEL {
+            return;
+        }
+        self.burn(ION_FUEL);
+        let (dir, y) = (self.pod.facing, self.pod.y);
+        let x0 = self.pod.x + dir * POD_HALF;
+        let mut x1 = x0 + dir * ION_RANGE;
+        // It bores a tunnel through anything but the walls and the shop's footing.
+        let ty = y.floor() as i32;
+        let mut tx = x0.floor() as i32;
+        let end = x1.floor() as i32;
+        while tx != end + dir as i32 {
+            let tile = self.world.get(tx, ty);
+            if tile == Tile::Wall {
+                x1 = if dir > 0.0 {
+                    tx as f32
+                } else {
+                    tx as f32 + 1.0
+                };
+                break;
+            }
+            if tile.is_solid() && !is_foundation(tx, ty) {
+                self.world.set(tx, ty, Tile::Air);
+                self.collect(tile, tx, ty);
+            }
+            tx += dir as i32;
+        }
+        self.strike(Weapon::Ion, Weapon::Ion.damage(), |m| {
+            Game::in_beam(m, x0, x1, y)
+        });
+        self.shake = self.shake.max(0.8);
+        self.ion_beam = Some(Beam { x0, x1, y, t: 0.35 });
+        self.events.push(Event::IonFired { x0, x1, y });
+    }
+
+    /// Hits every monster `reached` picks with `amount` of `weapon` damage,
+    /// removing and announcing the ones it kills.
+    fn strike(&mut self, weapon: Weapon, amount: f32, reached: impl Fn(&Monster) -> bool) {
+        let mut dead = Vec::new();
+        for (i, m) in self.monsters.iter_mut().enumerate() {
+            if !reached(m) {
+                continue;
+            }
+            match m.hit(weapon, amount) {
+                Hit::Killed => dead.push(i),
+                // A bomb that doesn't finish a Huge one still knocks it senseless.
+                Hit::Hurt if weapon == Weapon::Bomb && m.size == Size::Huge => {
+                    m.stun = 4.0;
+                    self.events.push(Event::MonsterStunned { x: m.x, y: m.y });
+                }
+                Hit::Hurt | Hit::Immune => {}
+            }
+        }
+        for i in dead.into_iter().rev() {
+            let m = self.monsters.remove(i);
+            // Only a heavy weapon's kill can drop a relic; the laser is the everyday tool.
+            if weapon.is_heavy() && self.rng.f32() < drop_chance(m.size) {
+                let relic = Relic::ALL[(self.rng.next_u64() % Relic::ALL.len() as u64) as usize];
+                self.drops.push(RelicDrop {
+                    x: m.x,
+                    y: m.y,
+                    vy: 0.0,
+                    relic,
+                });
+                self.events.push(Event::RelicDropped { x: m.x, y: m.y });
+            }
+            self.events.push(Event::MonsterKilled {
+                size: m.size,
+                kind: m.kind,
+                x: m.x,
+                y: m.y,
+                by: weapon,
+            });
         }
     }
 
@@ -905,14 +1329,15 @@ impl Game {
             side = -side;
         }
         let x = (self.pod.x + side * offset).clamp(lo, hi);
+        // Larger tiers have two creatures each; the Moss Titan only lives deeper.
+        let kind = match size {
+            Size::Large if depth > 350.0 && self.rng.f32() < 0.5 => Kind::MossTitan,
+            Size::Huge if self.rng.f32() < 0.5 => Kind::ShadowLeviathan,
+            s => Kind::of_size(s),
+        };
         self.monsters.push(Monster {
-            size,
-            x,
-            y,
             dir: -side,
-            phase: Phase::Warning(size.warning()),
-            age: 0.0,
-            stun: 0.0,
+            ..Monster::new(kind, x, y, Phase::Warning(size.warning()))
         });
         self.events.push(Event::MonsterWarning { size, x, y });
     }
@@ -934,6 +1359,7 @@ impl Game {
         let mut hit = None;
         for m in &mut self.monsters {
             m.age += dt;
+            m.immune_flash = (m.immune_flash - dt).max(0.0);
             if let Phase::Warning(t) = m.phase {
                 let left = t - dt;
                 self.shake = self.shake.max(0.25 + m.size.presence());
@@ -967,19 +1393,19 @@ impl Game {
             let near = 1.0 - ((m.x - px).hypot(m.y - py) / 12.0).min(1.0);
             self.shake = self.shake.max(near * m.size.presence());
             if hit.is_none() && m.touches(px, py, POD_HALF) {
-                hit = Some((m.size, m.x));
+                hit = Some((m.size, m.kind, m.x));
             }
         }
         self.monsters
             .retain(|m| (m.y - py).abs() < 18.0 && m.age < 45.0);
 
-        let Some((size, mx)) = hit else {
+        let Some((size, kind, mx)) = hit else {
             return;
         };
         if self.pod.invuln > 0.0 {
             return;
         }
-        let cause = format!("Caught by {}", size.name());
+        let cause = format!("Caught by {}", kind.name());
         match size.damage() {
             None => self.die(cause),
             Some(amount) => {
@@ -1008,6 +1434,7 @@ impl Game {
             hull: self.pod.hull,
             cargo: self.cargo.clone(),
             bombs: self.bombs,
+            arsenal: self.arsenal,
             stashes: self.stashes.clone(),
             changes: self.world.changes(),
             deaths: self.deaths,
@@ -1026,6 +1453,7 @@ impl Game {
         game.pod.hull = s.hull.clamp(1.0, game.levels.hull_max());
         game.cargo = s.cargo;
         game.bombs = s.bombs.min(BOMB_POUCH);
+        game.arsenal = s.arsenal;
         game.stashes = s.stashes;
         game.deaths = s.deaths;
         game.max_depth = s.max_depth;
@@ -1088,6 +1516,8 @@ pub struct SaveData {
     pub cargo: Vec<Item>,
     #[serde(default)]
     pub bombs: u8,
+    #[serde(default)]
+    pub arsenal: Arsenal,
     pub stashes: Vec<Stash>,
     pub changes: Vec<(i32, i32, Tile)>,
     pub deaths: u32,
@@ -1127,6 +1557,7 @@ impl From<SaveDataV1> for SaveData {
     fn from(v1: SaveDataV1) -> SaveData {
         let gems = |tiers: Vec<u8>| tiers.into_iter().map(Item::Gem).collect();
         SaveData {
+            arsenal: Arsenal::default(),
             version: SaveData::VERSION,
             seed: v1.seed,
             money: v1.money,
@@ -1194,13 +1625,8 @@ mod tests {
 
     fn huge_monster_on(g: &mut Game) {
         g.monsters.push(Monster {
-            size: Size::Huge,
-            x: g.pod.x,
-            y: g.pod.y,
             dir: 1.0,
-            phase: Phase::Active,
-            age: 0.0,
-            stun: 0.0,
+            ..Monster::new(Kind::of_size(Size::Huge), g.pod.x, g.pod.y, Phase::Active)
         });
     }
 
@@ -1312,15 +1738,12 @@ mod tests {
     fn monsters_never_move_vertically() {
         let mut g = game_at_depth(700);
         for size in Size::ALL {
-            g.monsters.push(Monster {
-                size,
-                x: 20.0,
-                y: 700.5,
-                dir: 1.0,
-                phase: Phase::Active,
-                age: 0.0,
-                stun: 0.0,
-            });
+            g.monsters.push(Monster::new(
+                Kind::of_size(size),
+                20.0,
+                700.5,
+                Phase::Active,
+            ));
         }
         for step in 0..(3.0 / DT) as usize {
             g.pod.invuln = f32::INFINITY;
@@ -1352,13 +1775,13 @@ mod tests {
         }
         g.pod.x = 6.5;
         g.monsters.push(Monster {
-            size: Size::Huge,
-            x: 2.5,
-            y: 601.0 - Size::Huge.dims().1 / 2.0,
             dir: 1.0,
-            phase: Phase::Active,
-            age: 0.0,
-            stun: 0.0,
+            ..Monster::new(
+                Kind::of_size(Size::Huge),
+                2.5,
+                601.0 - Size::Huge.dims().1 / 2.0,
+                Phase::Active,
+            )
         });
         let events = run(
             &mut g,
@@ -1528,15 +1951,8 @@ mod tests {
     fn blast_kills_monsters_but_only_stuns_the_deep_thing() {
         let mut g = game_at_depth(600);
         for (size, x) in [(Size::Large, 20.0), (Size::Huge, 40.0)] {
-            g.monsters.push(Monster {
-                size,
-                x,
-                y: 600.5,
-                dir: 1.0,
-                phase: Phase::Active,
-                age: 0.0,
-                stun: 0.0,
-            });
+            g.monsters
+                .push(Monster::new(Kind::of_size(size), x, 600.5, Phase::Active));
         }
         bomb_at(&mut g, 20.0, 600.5);
         bomb_at(&mut g, 40.0, 600.5);
@@ -1680,6 +2096,206 @@ mod tests {
             );
         }
         assert_eq!((g.pod.x, g.pod.y), SPAWN, "pod left under the shop");
+    }
+
+    /// A pocket at `depth` with every gun owned, a full tank, and a pod that can't be hurt.
+    fn armed(depth: i32) -> Game {
+        let mut g = game_at_depth(depth);
+        g.arsenal = Arsenal {
+            laser: true,
+            rockets: true,
+            ion: true,
+        };
+        g.pod.fuel = 1000.0;
+        g.pod.invuln = f32::INFINITY;
+        g
+    }
+
+    fn monster(g: &mut Game, size: Size, x: f32) -> f32 {
+        let y = g.pod.y;
+        g.monsters
+            .push(Monster::new(Kind::of_size(size), x, y, Phase::Active));
+        y
+    }
+
+    fn hold(secs: f32, input: Input, g: &mut Game) -> Vec<Event> {
+        let mut events = Vec::new();
+        for _ in 0..(secs / DT) as usize {
+            g.pod.invuln = f32::INFINITY;
+            events.extend(g.update(DT, input));
+        }
+        events
+    }
+
+    /// Bigger monsters take more hits: Large falls to one bomb, Huge needs three.
+    #[test]
+    fn bigger_monsters_take_more_bomb_hits() {
+        for (size, bombs) in [
+            (Size::Small, 1),
+            (Size::Medium, 1),
+            (Size::Large, 1),
+            (Size::Huge, 3),
+        ] {
+            let mut g = armed(300);
+            let y = monster(&mut g, size, 20.0);
+            for n in 1..=bombs {
+                assert_eq!(
+                    g.monsters.len(),
+                    1,
+                    "{size:?} died after {} bombs, expected {bombs}",
+                    n - 1
+                );
+                g.explode(20.0, y, Weapon::Bomb);
+            }
+            assert!(g.monsters.is_empty(), "{size:?} survived {bombs} bombs");
+        }
+    }
+
+    /// The laser and rockets can't touch the biggest, and the bar says so.
+    #[test]
+    fn the_biggest_shrug_off_laser_and_rockets() {
+        let mut g = armed(300);
+        let y = monster(&mut g, Size::Huge, 20.0);
+        g.strike(Weapon::Laser, 100.0, |_| true);
+        g.explode(20.0, y, Weapon::Rocket);
+        let m = &g.monsters[0];
+        assert_eq!(
+            m.hp,
+            Size::Huge.max_hp(),
+            "a Huge took laser or rocket damage"
+        );
+        assert!(m.immune_flash > 0.0, "health bar wasn't told it's immune");
+    }
+
+    /// The laser burns down a small monster in about a second.
+    #[test]
+    fn laser_kills_a_small_monster_quickly() {
+        let mut g = armed(300);
+        monster(&mut g, Size::Small, 8.0);
+        hold(
+            1.0,
+            Input {
+                laser: true,
+                ..Input::default()
+            },
+            &mut g,
+        );
+        assert!(
+            g.monsters.is_empty(),
+            "small monster survived a second of laser"
+        );
+    }
+
+    /// The ion cannon bores a tunnel and kills even a Huge in two shots.
+    #[test]
+    fn ion_cannon_kills_the_biggest_in_two_shots() {
+        let mut g = armed(300);
+        monster(&mut g, Size::Huge, 12.0);
+        for shot in 1..=2 {
+            assert_eq!(g.monsters.len(), 1, "Huge died before shot {shot}");
+            hold(
+                ION_CHARGE + 0.1,
+                Input {
+                    ion: true,
+                    ..Input::default()
+                },
+                &mut g,
+            );
+            hold(DT, Input::default(), &mut g);
+        }
+        assert!(g.monsters.is_empty(), "Huge survived two ion shots");
+        let row = g.pod.y.floor() as i32;
+        assert_eq!(
+            g.world.get(14, row),
+            Tile::Air,
+            "ion shot didn't bore a tunnel"
+        );
+    }
+
+    /// A rocket fired point-blank at rock breaks it without hurting the pod.
+    #[test]
+    fn rockets_break_rock_but_spare_the_pod() {
+        let mut g = armed(300);
+        g.pod.invuln = 0.0;
+        g.pod.x = 4.5;
+        g.pod.facing = -1.0;
+        let full = g.pod.hull;
+        let row = g.pod.y.floor() as i32;
+        g.launch_rocket();
+        for _ in 0..30 {
+            g.update(DT, Input::default());
+        }
+        assert_eq!(
+            g.world.get(3, row),
+            Tile::Air,
+            "rocket didn't break the rock"
+        );
+        assert_eq!(g.pod.hull, full, "own rocket hurt the pod");
+    }
+
+    /// Guns are bought once, at the shop.
+    #[test]
+    fn guns_are_bought_once() {
+        let mut g = Game::new(1);
+        g.money = 10_000;
+        g.apply(ShopAction::BuyGun(Gun::Laser));
+        g.apply(ShopAction::BuyGun(Gun::Laser));
+        assert!(g.arsenal.laser);
+        assert_eq!(
+            g.money,
+            10_000 - Gun::Laser.price(),
+            "charged twice for the laser"
+        );
+    }
+
+    /// A heavy-weapon kill of a Huge always drops a relic; laser kills never do.
+    #[test]
+    fn relics_come_only_from_heavy_kills() {
+        let mut g = armed(300);
+        let y = monster(&mut g, Size::Huge, 20.0);
+        for _ in 0..3 {
+            g.explode(20.0, y, Weapon::Bomb);
+        }
+        assert_eq!(g.drops.len(), 1, "a bombed Huge didn't drop a relic");
+        for seed in 0..40 {
+            let mut g = armed(300);
+            g.rng = Rng::new(seed);
+            monster(&mut g, Size::Large, 8.0);
+            g.strike(Weapon::Laser, 100.0, |_| true);
+            assert!(
+                g.drops.is_empty(),
+                "laser kill dropped a relic (seed {seed})"
+            );
+        }
+    }
+
+    /// Relics are permanent and stack past the shop's max level.
+    #[test]
+    fn relics_stack_past_the_shop_max() {
+        let mut g = armed(300);
+        g.levels.tank = MAX_LEVEL;
+        let before = g.levels.fuel_max();
+        g.drops.push(RelicDrop {
+            x: g.pod.x,
+            y: g.pod.y,
+            vy: 0.0,
+            relic: Relic::ReserveTank,
+        });
+        let events = g.update(DT, Input::default());
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::RelicFound(Relic::ReserveTank)))
+        );
+        assert_eq!(g.levels.fuel_max(), before + 15.0);
+        let back = Game::from_save(
+            serde_json::from_str(&serde_json::to_string(&g.to_save()).unwrap()).unwrap(),
+        );
+        assert_eq!(
+            back.levels.reserve_tank, 1,
+            "relic lost in a save round trip"
+        );
+        assert!(back.arsenal.ion, "guns lost in a save round trip");
     }
 
     /// Saving mid-dig must not put the pod inside rock on reload.

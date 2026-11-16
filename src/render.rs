@@ -8,7 +8,8 @@ use macroquad::rand::gen_range;
 
 use crate::art::Art;
 use crate::game::{
-    BOMB_POUCH, Event, FUSE, Game, Item, MAX_LEVEL, POD_HALF, SHOP_COLUMNS, ShopAction, Upgrade,
+    BOMB_POUCH, Event, FUSE, Game, Gun, Item, MAX_LEVEL, POD_HALF, SHOP_COLUMNS, ShopAction,
+    Upgrade,
 };
 use crate::monsters::{Monster, Phase, Size};
 use crate::world::Mineral;
@@ -57,7 +58,7 @@ struct Toast {
 pub struct ShopButton {
     pub rect: Rect,
     pub action: ShopAction,
-    pub key: KeyCode,
+    pub key: Option<KeyCode>,
     label: String,
     detail: String,
     enabled: bool,
@@ -601,7 +602,37 @@ impl Renderer {
                 self.toast("Got it!");
                 self.burst(*x, *y, 30, Color::new(0.6, 0.3, 0.8, 1.0), 6.0, 8.0, true);
             }
-            Event::MonsterStunned { .. } => self.toast("The Deep Thing is stunned! Fly up!"),
+            Event::MonsterStunned { .. } => self.toast("Stunned it! Fly up!"),
+            Event::BoughtGun(g) => {
+                self.toast(format!("{} bought!", g.name()));
+                self.burst(
+                    game.pod.x,
+                    game.pod.y,
+                    30,
+                    Color::new(0.5, 0.9, 1.0, 1.0),
+                    5.0,
+                    0.0,
+                    true,
+                );
+            }
+            Event::RocketFired => {}
+            Event::RelicDropped { x, y } => {
+                self.toast("Something dropped a relic!");
+                self.burst(*x, *y, 30, GOLD, 5.0, 0.0, true);
+            }
+            Event::RelicFound(r) => {
+                self.toast(format!("Relic found! {}", r.name()));
+                self.flash = self.flash.max(0.3);
+                self.burst(game.pod.x, game.pod.y, 50, GOLD, 6.0, 0.0, true);
+            }
+            Event::IonFired { x0, x1, y } => {
+                self.flash = self.flash.max(0.25);
+                let n = ((x1 - x0).abs() * 3.0) as usize;
+                for i in 0..n {
+                    let x = x0 + (x1 - x0) * i as f32 / n.max(1) as f32;
+                    self.burst(x, *y, 1, Color::new(0.6, 0.9, 1.0, 1.0), 3.0, 0.0, true);
+                }
+            }
         }
     }
 
@@ -635,13 +666,14 @@ impl Renderer {
         self.draw_shop(art);
         self.draw_stashes(game, art);
         self.draw_bombs(game);
+        self.draw_rockets(game);
         for m in &game.monsters {
             self.draw_monster(m, art);
         }
         self.draw_pod(game, art);
         self.draw_particles(false);
         self.draw_darkness(game, sw, sh);
-        self.draw_glints(game, sw, sh);
+        self.draw_glints(game, art, sw, sh);
         self.draw_particles(true);
         self.draw_stash_arrows(game, sw, sh);
         if self.flash > 0.0 {
@@ -920,6 +952,26 @@ impl Renderer {
         );
     }
 
+    fn draw_rockets(&self, game: &Game) {
+        for r in &game.rockets {
+            let p = self.screen(r.x, r.y);
+            let d = r.vx.signum();
+            draw_rectangle(
+                p.x - 9.0,
+                p.y - 3.0,
+                18.0,
+                6.0,
+                Color::new(0.75, 0.75, 0.8, 1.0),
+            );
+            draw_triangle(
+                vec2(p.x + d * 9.0, p.y - 3.0),
+                vec2(p.x + d * 9.0, p.y + 3.0),
+                vec2(p.x + d * 15.0, p.y),
+                Color::new(0.9, 0.25, 0.2, 1.0),
+            );
+        }
+    }
+
     fn draw_bombs(&self, game: &Game) {
         for b in &game.live_bombs {
             let p = self.screen(b.x, b.y);
@@ -981,27 +1033,42 @@ impl Renderer {
             }
             return;
         }
-        let frame = (self.t * 4.0 + m.x) as i32 % 2;
-        let bob = if m.size == Size::Medium {
-            (self.t * 6.0).sin() * 4.0
-        } else {
-            0.0
-        };
-        let tint = match m.size {
-            Size::Huge => Color::new(0.55, 0.35, 0.75, 1.0),
-            _ => WHITE,
-        };
         let dest = vec2(w * TILE * 1.15, h * TILE * 1.15);
-        match art.get(&format!("{}_{frame}", monster_sprite(m.size))) {
-            Some(tex) => tex.draw_ex(
-                p.x - dest.x / 2.0,
-                p.y - dest.y / 2.0 + bob,
-                dest.x,
-                dest.y,
-                tint,
-                m.dir < 0.0,
-                0.0,
-            ),
+        // The new 8-frame creature art, or the older 2-frame sprites until it's in.
+        let frame8 = (self.t * 8.0 + m.x) as i32 % 8;
+        let frame2 = (self.t * 4.0 + m.x) as i32 % 2;
+        let (sprite, tint, bob) = match art.get(&format!("{}_{frame8}", m.kind.sprite())) {
+            Some(s) => (Some(s), WHITE, 0.0),
+            None => {
+                let tint = if m.size == Size::Huge {
+                    Color::new(0.55, 0.35, 0.75, 1.0)
+                } else {
+                    WHITE
+                };
+                let bob = if m.size == Size::Medium {
+                    (self.t * 6.0).sin() * 4.0
+                } else {
+                    0.0
+                };
+                let old = format!("{}_{frame2}", monster_sprite(m.size));
+                (art.get(&old), tint, bob)
+            }
+        };
+        match sprite {
+            Some(tex) => {
+                // Fit inside the body box without stretching the art.
+                let k = (dest.x / tex.size().x).min(dest.y / tex.size().y);
+                let (dw, dh) = (tex.size().x * k, tex.size().y * k);
+                tex.draw_ex(
+                    p.x - dw / 2.0,
+                    p.y + dest.y / 2.0 - dh + bob,
+                    dw,
+                    dh,
+                    tint,
+                    m.dir < 0.0,
+                    0.0,
+                )
+            }
             None => draw_ellipse(
                 p.x,
                 p.y,
@@ -1145,7 +1212,7 @@ impl Renderer {
         draw_rectangle(rt, t, (sw - rt).max(0.0), 2.0 * r, shade);
     }
 
-    fn draw_glints(&self, game: &Game, sw: f32, sh: f32) {
+    fn draw_glints(&self, game: &Game, art: &Art, sw: f32, sh: f32) {
         let (c, r) = self.light(game);
         let seed = game.world.seed;
         let x0 = (self.view.x / TILE).floor() as i32;
@@ -1219,6 +1286,10 @@ impl Renderer {
             }
         }
 
+        self.draw_beams(game);
+        self.draw_relic_drops(game, art);
+        self.draw_health_bars(game);
+
         // The fuse spark blinks faster as it burns down.
         for b in &game.live_bombs {
             let p = self.screen(b.x, b.y);
@@ -1250,6 +1321,153 @@ impl Renderer {
                     ..Default::default()
                 },
             );
+        }
+    }
+
+    /// Relics glow over the dark so a drop is never lost in it.
+    fn draw_relic_drops(&self, game: &Game, art: &Art) {
+        for (i, d) in game.drops.iter().enumerate() {
+            let bob = (self.t * 3.0 + i as f32).sin() * 4.0;
+            let p = self.screen(d.x, d.y) + vec2(0.0, bob);
+            let r = TILE * (0.9 + 0.2 * (self.t * 4.0).sin());
+            draw_texture_ex(
+                &self.glow,
+                p.x - r,
+                p.y - r,
+                Color::new(1.0, 0.85, 0.35, 0.8),
+                DrawTextureParams {
+                    dest_size: Some(vec2(2.0 * r, 2.0 * r)),
+                    ..Default::default()
+                },
+            );
+            let size = TILE * 0.7;
+            match art.get("relic_coin") {
+                Some(s) => s.draw(p.x - size / 2.0, p.y - size / 2.0, size, size, WHITE),
+                None => {
+                    draw_poly(p.x, p.y, 6, size * 0.45, self.t * 60.0, GOLD);
+                    draw_poly(
+                        p.x,
+                        p.y,
+                        6,
+                        size * 0.25,
+                        self.t * 60.0,
+                        Color::new(1.0, 0.95, 0.7, 1.0),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Laser, ion shot and the ion cannon's charge glow. Drawn over the dark,
+    /// since they're light sources themselves.
+    fn draw_beams(&self, game: &Game) {
+        if let Some(b) = game.laser {
+            let (a, c) = (self.screen(b.x0, b.y), self.screen(b.x1, b.y));
+            let flicker = 0.75 + 0.25 * (self.t * 40.0).sin();
+            draw_line(
+                a.x,
+                a.y,
+                c.x,
+                c.y,
+                7.0,
+                Color::new(1.0, 0.2, 0.25, 0.35 * flicker),
+            );
+            draw_line(
+                a.x,
+                a.y,
+                c.x,
+                c.y,
+                2.5,
+                Color::new(1.0, 0.85, 0.85, flicker),
+            );
+            let r = 14.0;
+            draw_texture_ex(
+                &self.glow,
+                c.x - r,
+                c.y - r,
+                Color::new(1.0, 0.4, 0.3, 0.9),
+                DrawTextureParams {
+                    dest_size: Some(vec2(2.0 * r, 2.0 * r)),
+                    ..Default::default()
+                },
+            );
+        }
+        if let Some(b) = game.ion_beam {
+            let (a, c) = (self.screen(b.x0, b.y), self.screen(b.x1, b.y));
+            let k = (b.t / 0.35).clamp(0.0, 1.0);
+            draw_line(
+                a.x,
+                a.y,
+                c.x,
+                c.y,
+                26.0 * k,
+                Color::new(0.4, 0.8, 1.0, 0.45 * k),
+            );
+            draw_line(a.x, a.y, c.x, c.y, 9.0 * k, Color::new(0.9, 1.0, 1.0, k));
+        }
+        if game.ion_charge > 0.0 {
+            let k = (game.ion_charge / crate::game::ION_CHARGE).min(1.0);
+            let p = self.screen(game.pod.x + game.pod.facing * POD_HALF, game.pod.y);
+            let r = 8.0
+                + 26.0 * k
+                + if k >= 1.0 {
+                    (self.t * 20.0).sin() * 3.0
+                } else {
+                    0.0
+                };
+            draw_texture_ex(
+                &self.glow,
+                p.x - r,
+                p.y - r,
+                Color::new(0.5, 0.85, 1.0, 0.5 + 0.5 * k),
+                DrawTextureParams {
+                    dest_size: Some(vec2(2.0 * r, 2.0 * r)),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+
+    /// A bar over each monster in or near the light, so you can see a fight
+    /// going your way, or that this weapon can't hurt it at all.
+    fn draw_health_bars(&self, game: &Game) {
+        let (c, r) = self.light(game);
+        for m in &game.monsters {
+            if !m.is_active() {
+                continue;
+            }
+            let (w, h) = m.size.dims();
+            let top = self.screen(m.x, m.y - h * 0.6);
+            if top.distance(c) > r * 1.3 + w * TILE {
+                continue;
+            }
+            let bw = (w * TILE * 0.8).clamp(30.0, 140.0);
+            let (x, y) = (top.x - bw / 2.0, top.y - 10.0);
+            draw_rectangle(
+                x - 1.0,
+                y - 1.0,
+                bw + 2.0,
+                7.0,
+                Color::new(0.0, 0.0, 0.0, 0.7),
+            );
+            if m.immune_flash > 0.0 {
+                draw_rectangle(x, y, bw, 5.0, Color::new(0.55, 0.55, 0.6, 1.0));
+                text_centered(
+                    "bombs or ion only",
+                    top.x,
+                    y - 6.0,
+                    18.0,
+                    Color::new(0.85, 0.85, 0.9, 1.0),
+                );
+            } else {
+                let hp = m.health();
+                let fill = mix(
+                    Color::new(0.9, 0.2, 0.2, 1.0),
+                    Color::new(0.35, 0.9, 0.4, 1.0),
+                    hp,
+                );
+                draw_rectangle(x, y, bw * hp, 5.0, fill);
+            }
         }
     }
 
@@ -1328,7 +1546,12 @@ impl Renderer {
             - gap;
         // Grow to fit the widest row, so counts in the tens and hundreds never spill.
         let width = 300.0f32.max(12.0 + minerals_w + 14.0);
-        draw_rectangle(x, y, width, 254.0, PANEL);
+        let has_kit = game.arsenal.laser
+            || game.arsenal.rockets
+            || game.arsenal.ion
+            || game.levels.relics() > 0;
+        let height = if has_kit { 286.0 } else { 254.0 };
+        draw_rectangle(x, y, width, height, PANEL);
         let icon = |name: &str, row: f32| {
             if let Some(tex) = art.get(name) {
                 tex.draw(x + 10.0, y + 8.0 + row * 33.0, 28.0, 28.0, WHITE);
@@ -1420,6 +1643,33 @@ impl Renderer {
             mx += 16.0 + measure_text(label, None, 20, 1.0).width + gap;
         }
 
+        // Guns she owns with their keys, and relics found.
+        let mut kit: Vec<&str> = Vec::new();
+        if game.arsenal.laser {
+            kit.push("F laser");
+        }
+        if game.arsenal.rockets {
+            kit.push("G rockets");
+        }
+        if game.arsenal.ion {
+            kit.push("H ion");
+        }
+        let relics = game.levels.relics();
+        if !kit.is_empty() || relics > 0 {
+            let line = if relics > 0 {
+                format!("{}   relics {relics}", kit.join("  "))
+            } else {
+                kit.join("  ")
+            };
+            text(
+                line.trim(),
+                x + 12.0,
+                y + 274.0,
+                20.0,
+                Color::new(0.6, 0.85, 1.0, 1.0),
+            );
+        }
+
         if game.depth() < 1.0 && !game.at_shop() {
             text_centered(
                 "Arrow keys or WASD to drive and dig.  Up to fly.  Sell gems at the shop.",
@@ -1448,10 +1698,11 @@ impl Renderer {
 
 /// The shop's rows, laid out for the current screen; shared by drawing and input.
 pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
-    let (w, h) = (360.0, 44.0);
-    let x = sw - w - 16.0;
-    let mut y = 64.0;
-    let mut rows = Vec::new();
+    // Two columns, services on the left, upgrades and weapons on the right,
+    // so the panel fits a 720-pixel-tall window. Number keys cover the first ten.
+    let (w, h, gap) = (340.0, 44.0, 6.0);
+    let right = sw - w - 16.0;
+    let left = right - w - 12.0;
     let keys = [
         KeyCode::Key1,
         KeyCode::Key2,
@@ -1464,20 +1715,23 @@ pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
         KeyCode::Key9,
         KeyCode::Key0,
     ];
-    let mut push = |action, label: String, detail: String, enabled: bool| {
-        let key = keys[rows.len()];
+    let mut rows: Vec<ShopButton> = Vec::new();
+    let mut ys = [64.0f32, 64.0f32];
+    let mut push = |col: usize, action, label: String, detail: String, enabled: bool| {
+        let x = if col == 0 { left } else { right };
         rows.push(ShopButton {
-            rect: Rect::new(x, y, w, h),
+            rect: Rect::new(x, ys[col], w, h),
             action,
-            key,
+            key: None,
             label,
             detail,
             enabled,
         });
-        y += h + 6.0;
+        ys[col] += h + gap;
     };
     let value = game.cargo_value();
     push(
+        0,
         ShopAction::Sell,
         "Sell gems".into(),
         format!("+{}", money(value)),
@@ -1485,12 +1739,14 @@ pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
     );
     let minerals = game.mineral_value();
     push(
+        0,
         ShopAction::SellMinerals,
         "Sell spare minerals".into(),
         format!("+{}", money(minerals)),
         minerals > 0,
     );
     push(
+        0,
         ShopAction::Craft,
         format!("Craft bomb  ({}/{BOMB_POUCH})", game.bombs),
         "C+S+P".into(),
@@ -1498,6 +1754,7 @@ pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
     );
     let fuel = game.refuel_cost();
     push(
+        0,
         ShopAction::Refuel,
         "Refuel".into(),
         money(fuel),
@@ -1505,6 +1762,7 @@ pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
     );
     let repair = game.repair_cost();
     push(
+        0,
         ShopAction::Repair,
         "Repair hull".into(),
         money(repair),
@@ -1514,37 +1772,78 @@ pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
         let level = game.levels.get(u);
         let label = format!("{}  Lv {level}/{MAX_LEVEL}", u.name());
         if level >= MAX_LEVEL {
-            push(ShopAction::Buy(u), label, "MAX".into(), false);
+            push(1, ShopAction::Buy(u), label, "MAX".into(), false);
         } else {
             let cost = u.cost(level);
-            push(ShopAction::Buy(u), label, money(cost), game.money >= cost);
+            push(
+                1,
+                ShopAction::Buy(u),
+                label,
+                money(cost),
+                game.money >= cost,
+            );
         }
+    }
+    for g in Gun::ALL {
+        if game.arsenal.has(g) {
+            push(
+                1,
+                ShopAction::BuyGun(g),
+                g.name().into(),
+                "OWNED".into(),
+                false,
+            );
+        } else {
+            push(
+                1,
+                ShopAction::BuyGun(g),
+                g.name().into(),
+                money(g.price()),
+                game.money >= g.price(),
+            );
+        }
+    }
+    // Keys follow the old single-column order: services, then upgrades.
+    let keyed = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| !matches!(b.action, ShopAction::BuyGun(_)))
+        .map(|(i, _)| i)
+        .take(keys.len())
+        .collect::<Vec<_>>();
+    for (k, i) in keyed.into_iter().enumerate() {
+        rows[i].key = Some(keys[k]);
     }
     rows
 }
 
+fn key_digit(k: KeyCode) -> char {
+    match k {
+        KeyCode::Key1 => '1',
+        KeyCode::Key2 => '2',
+        KeyCode::Key3 => '3',
+        KeyCode::Key4 => '4',
+        KeyCode::Key5 => '5',
+        KeyCode::Key6 => '6',
+        KeyCode::Key7 => '7',
+        KeyCode::Key8 => '8',
+        KeyCode::Key9 => '9',
+        _ => '0',
+    }
+}
+
 fn draw_shop_panel(game: &Game, sw: f32) {
     let rows = shop_buttons(game, sw);
-    let Some(first) = rows.first() else {
+    if rows.is_empty() {
         return;
-    };
-    let last = rows.last().map_or(first.rect, |r| r.rect);
-    draw_rectangle(
-        first.rect.x - 12.0,
-        14.0,
-        first.rect.w + 24.0,
-        last.y + last.h + 12.0 - 14.0,
-        PANEL,
-    );
-    text(
-        "SHOP  (click, or press 1-0)",
-        first.rect.x,
-        46.0,
-        26.0,
-        GOLD,
-    );
+    }
+    let x0 = rows.iter().map(|b| b.rect.x).fold(f32::MAX, f32::min);
+    let x1 = rows.iter().map(|b| b.rect.right()).fold(0.0, f32::max);
+    let y1 = rows.iter().map(|b| b.rect.bottom()).fold(0.0, f32::max);
+    draw_rectangle(x0 - 12.0, 14.0, x1 - x0 + 24.0, y1 + 12.0 - 14.0, PANEL);
+    text("SHOP  (click, or press 1-0)", x0, 46.0, 26.0, GOLD);
     let mouse = Vec2::from(mouse_position());
-    for (i, b) in rows.iter().enumerate() {
+    for b in &rows {
         let hover = b.rect.contains(mouse) && b.enabled;
         let bg = match (b.enabled, hover) {
             (true, true) => Color::new(0.35, 0.3, 0.15, 1.0),
@@ -1558,7 +1857,10 @@ fn draw_shop_panel(game: &Game, sw: f32) {
             Color::new(0.5, 0.5, 0.55, 1.0)
         };
         text(
-            &format!("{}  {}", i + 1, b.label),
+            &match b.key {
+                Some(k) => format!("{}  {}", key_digit(k), b.label),
+                None => format!("   {}", b.label),
+            },
             b.rect.x + 12.0,
             b.rect.y + 29.0,
             24.0,
