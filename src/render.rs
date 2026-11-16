@@ -256,6 +256,82 @@ fn draw_tree(x: f32, base: f32, s: f32, kind: u64, shade: f32) {
     }
 }
 
+/// A decoration in an open cave tile: purely visual, never in the way.
+#[derive(Clone, Copy)]
+struct Decor {
+    /// Sprite name, or the prefix of numbered variants.
+    name: &'static str,
+    /// Hangs from the ceiling instead of standing on the floor.
+    hanging: bool,
+    /// Gives off light, so it shows through the dark.
+    glows: bool,
+}
+
+/// What decorates the open tile at (tx, ty), decided by the seed alone so it
+/// never moves or flickers between frames. About one in twenty open tiles.
+fn decor_at(game: &Game, tx: i32, ty: i32) -> Option<Decor> {
+    if ty < 3 || game.world.get(tx, ty) != Tile::Air {
+        return None;
+    }
+    let h = world::hash(game.world.seed, tx, ty, 50);
+    if world::unit(h) > 0.05 {
+        return None;
+    }
+    let band = world::band(ty);
+    let pick = |opts: &[Decor]| opts[((h >> 20) as usize) % opts.len()];
+    let d = |name, hanging, glows| Decor {
+        name,
+        hanging,
+        glows,
+    };
+    if game.world.get(tx, ty + 1).is_solid() {
+        let floor: &[Decor] = match band {
+            0 | 1 => &[
+                d("bones", false, false),
+                d("mine_support", false, false),
+                d("crate", false, false),
+                d("lantern", false, true),
+            ],
+            2 => &[
+                d("stalagmite", false, false),
+                d("crystal", false, true),
+                d("bones", false, false),
+                d("pillar", false, false),
+            ],
+            _ => &[
+                d("glow_mushroom", false, true),
+                d("crystal", false, true),
+                d("glow_plant", false, true),
+                d("stalagmite", false, false),
+                d("ruins", false, false),
+            ],
+        };
+        return Some(pick(floor));
+    }
+    if game.world.get(tx, ty - 1).is_solid() {
+        let ceiling: &[Decor] = match band {
+            0 | 1 => &[d("roots", true, false)],
+            _ => &[d("stalactite", true, false), d("roots", true, false)],
+        };
+        return Some(pick(ceiling));
+    }
+    None
+}
+
+/// The sprite for a decor name: the plain name, or one of its numbered variants.
+fn decor_sprite<'a>(art: &'a Art, name: &str, h: u64) -> Option<crate::art::Sprite<'a>> {
+    if let Some(s) = art.get(name) {
+        return Some(s);
+    }
+    let n = (0..8)
+        .take_while(|i| art.get(&format!("{name}_{i}")).is_some())
+        .count();
+    if n == 0 {
+        return None;
+    }
+    art.get(&format!("{name}_{}", (h as usize) % n))
+}
+
 /// How dark the deep is (0 = daylight) at a depth in tiles.
 fn darkness(depth: f32) -> f32 {
     ((depth - 10.0) / 350.0).clamp(0.0, 1.0).powf(0.8) * 0.96
@@ -686,7 +762,7 @@ impl Renderer {
         self.view = (cam - vec2(sw / 2.0, sh / 2.0) + shake).round();
 
         clear_background(Color::new(0.02, 0.02, 0.04, 1.0));
-        self.draw_sky(sw);
+        self.draw_sky(art, sw);
         self.draw_tiles(game, art, sw, sh);
         self.draw_shop(art);
         self.draw_sites(game, art, sh);
@@ -719,7 +795,7 @@ impl Renderer {
         self.draw_toasts(sw);
     }
 
-    fn draw_sky(&self, sw: f32) {
+    fn draw_sky(&self, art: &Art, sw: f32) {
         if self.view.y >= 0.0 {
             return;
         }
@@ -752,28 +828,36 @@ impl Renderer {
         }
         draw_circle(sun.x, sun.y, 26.0, Color::new(1.0, 0.98, 0.9, 0.95));
 
-        self.draw_clouds(sw, ground, 0.04, 5.0, 0.9, 7, 11);
-        // Far to near: each ridge moves a little more with the camera than the last.
+        self.draw_clouds(art, sw, ground, 0.04, 5.0, 0.9, 7, 11);
+        // Far to near: each layer moves a little more with the camera than the
+        // last. Painted mountains when the art is there, drawn ridges otherwise.
+        if !self.draw_strip(art, "mountains_far", sw, ground + 6.0, 250.0, 0.08) {
+            self.draw_ridge(
+                art,
+                sw,
+                ground,
+                0.08,
+                230.0,
+                Color::new(0.62, 0.72, 0.86, 1.0),
+                1,
+                false,
+            );
+        }
+        self.draw_clouds(art, sw, ground, 0.12, 11.0, 0.6, 5, 12);
+        if !self.draw_strip(art, "mountains_near", sw, ground + 6.0, 170.0, 0.22) {
+            self.draw_ridge(
+                art,
+                sw,
+                ground,
+                0.22,
+                150.0,
+                Color::new(0.5, 0.7, 0.66, 1.0),
+                2,
+                false,
+            );
+        }
         self.draw_ridge(
-            sw,
-            ground,
-            0.08,
-            230.0,
-            Color::new(0.62, 0.72, 0.86, 1.0),
-            1,
-            false,
-        );
-        self.draw_clouds(sw, ground, 0.12, 11.0, 0.6, 5, 12);
-        self.draw_ridge(
-            sw,
-            ground,
-            0.22,
-            150.0,
-            Color::new(0.5, 0.7, 0.66, 1.0),
-            2,
-            false,
-        );
-        self.draw_ridge(
+            art,
             sw,
             ground,
             0.45,
@@ -785,10 +869,41 @@ impl Renderer {
         self.draw_birds(ground);
     }
 
+    /// A painted strip (a mountain range) repeated across the sky, standing on
+    /// `bottom`, `height` pixels tall. False if the sprite isn't there.
+    fn draw_strip(
+        &self,
+        art: &Art,
+        name: &str,
+        sw: f32,
+        bottom: f32,
+        height: f32,
+        parallax: f32,
+    ) -> bool {
+        let Some(s) = art.get(name) else {
+            return false;
+        };
+        let w = height * s.size().x / s.size().y;
+        let mut x = -(self.view.x * parallax).rem_euclid(w);
+        while x < sw {
+            s.draw(x, bottom - height, w + 1.0, height, WHITE);
+            x += w;
+        }
+        true
+    }
+
+    /// Names that exist for `prefix_0`, `prefix_1`, ... in the atlas.
+    fn variants<'a>(art: &'a Art, prefix: &str) -> Vec<crate::art::Sprite<'a>> {
+        (0..16)
+            .map_while(|i| art.get(&format!("{prefix}_{i}")))
+            .collect()
+    }
+
     /// A rolling ridge line made of a few slow sine waves, drawn as thin columns.
     #[allow(clippy::too_many_arguments)] // Private layer helper; the args are the layer.
     fn draw_ridge(
         &self,
+        art: &Art,
         sw: f32,
         ground: f32,
         parallax: f32,
@@ -822,6 +937,8 @@ impl Renderer {
         // poplars and bushes, each standing on the hill where it's drawn.
         let spacing = 30.0;
         let first = (offset / spacing).floor() as i32 - 1;
+        let mut painted = Self::variants(art, "tree");
+        painted.extend(Self::variants(art, "bush"));
         for i in first..first + (sw / spacing) as i32 + 3 {
             let h = world::hash(seed, i, 0, 21);
             if world::unit(h) < 0.35 {
@@ -830,7 +947,14 @@ impl Renderer {
             let u = i as f32 * spacing + world::unit(h >> 8) * 18.0;
             let base = ground - ridge(u) + 3.0;
             let s = 0.7 + 0.7 * world::unit(h >> 16);
-            draw_tree(u - offset, base, s, (h >> 24) % 4, world::unit(h >> 32));
+            if painted.is_empty() {
+                draw_tree(u - offset, base, s, (h >> 24) % 4, world::unit(h >> 32));
+                continue;
+            }
+            let sprite = painted[((h >> 24) as usize) % painted.len()];
+            let th = 44.0 * s;
+            let tw = th * sprite.size().x / sprite.size().y;
+            sprite.draw(u - offset - tw / 2.0, base - th, tw, th, WHITE);
         }
     }
 
@@ -838,6 +962,7 @@ impl Renderer {
     #[allow(clippy::too_many_arguments)] // Private layer helper; the args are the layer.
     fn draw_clouds(
         &self,
+        art: &Art,
         sw: f32,
         ground: f32,
         parallax: f32,
@@ -850,6 +975,7 @@ impl Renderer {
         let span = sw + 2.0 * margin;
         let shade = Color::new(0.84, 0.85, 0.95, 0.95);
         let white = Color::new(1.0, 1.0, 0.99, 0.97);
+        let painted = Self::variants(art, "cloud");
         for i in 0..count {
             let h1 = world::unit(world::hash(seed, i, 1, 31));
             let h2 = world::unit(world::hash(seed, i, 2, 31));
@@ -857,6 +983,13 @@ impl Renderer {
             let travel = h1 * span - self.t * wind - self.view.x * parallax;
             let x = travel.rem_euclid(span) - margin;
             let y = ground - (170.0 + 230.0 * h2) * (0.6 + scale * 0.5);
+            if !painted.is_empty() {
+                let c = painted[i as usize % painted.len()];
+                let cw = 4.2 * r;
+                let ch = cw * c.size().y / c.size().x;
+                c.draw(x - cw / 2.0, y - ch / 2.0, cw, ch, with_alpha(WHITE, 0.95));
+                continue;
+            }
             let puffs = [
                 (-1.25, 0.15, 0.6),
                 (-0.6, -0.15, 0.82),
@@ -949,6 +1082,22 @@ impl Renderer {
         // their own pass rather than breaking the tile batch at every mineral.
         for (p, m, h) in minerals {
             draw_mineral(p, m, h);
+        }
+        // Decor last, so it sits in front of the cave wall behind it.
+        for ty in y0.max(3)..=y1 {
+            for tx in x0..=x1 {
+                let Some(d) = decor_at(game, tx, ty) else {
+                    continue;
+                };
+                let Some(s) = decor_sprite(art, d.name, world::hash(seed, tx, ty, 51)) else {
+                    continue;
+                };
+                let p = self.screen(tx as f32, ty as f32);
+                let k = (TILE * 0.95 / s.size().x).min(TILE * 0.95 / s.size().y);
+                let (w, h) = (s.size().x * k, s.size().y * k);
+                let y = if d.hanging { p.y } else { p.y + TILE - h };
+                s.draw(p.x + (TILE - w) / 2.0, y, w, h, WHITE);
+            }
         }
     }
 
@@ -1352,6 +1501,7 @@ impl Renderer {
             }
         }
 
+        self.draw_decor_glow(game, sw, sh);
         self.draw_beams(game);
         self.draw_relic_drops(game, art);
         self.draw_health_bars(game);
@@ -1387,6 +1537,42 @@ impl Renderer {
                     ..Default::default()
                 },
             );
+        }
+    }
+
+    /// Glowing mushrooms, crystals and lanterns light their corner of the dark.
+    fn draw_decor_glow(&self, game: &Game, sw: f32, sh: f32) {
+        let x0 = (self.view.x / TILE).floor() as i32;
+        let y0 = (self.view.y / TILE).floor() as i32;
+        let x1 = ((self.view.x + sw) / TILE).ceil() as i32;
+        let y1 = ((self.view.y + sh) / TILE).ceil() as i32;
+        for ty in y0.max(3)..=y1 {
+            for tx in x0..=x1 {
+                let Some(d) = decor_at(game, tx, ty) else {
+                    continue;
+                };
+                if !d.glows {
+                    continue;
+                }
+                let p = self.screen(tx as f32 + 0.5, ty as f32 + 0.6);
+                let pulse = 0.8 + 0.2 * (self.t * 1.5 + tx as f32).sin();
+                let r = TILE * 1.3 * pulse;
+                let color = match d.name {
+                    "lantern" => Color::new(1.0, 0.75, 0.35, 0.55),
+                    "crystal" => Color::new(0.55, 0.85, 1.0, 0.5),
+                    _ => Color::new(0.5, 0.4, 1.0, 0.5),
+                };
+                draw_texture_ex(
+                    &self.glow,
+                    p.x - r,
+                    p.y - r,
+                    color,
+                    DrawTextureParams {
+                        dest_size: Some(vec2(2.0 * r, 2.0 * r)),
+                        ..Default::default()
+                    },
+                );
+            }
         }
     }
 
