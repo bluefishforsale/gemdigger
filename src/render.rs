@@ -33,6 +33,8 @@ const BAND_COLORS: [Color; 5] = [
     Color::new(0.28, 0.33, 0.43, 1.0),
     Color::new(0.17, 0.13, 0.23, 1.0),
 ];
+/// Height of the green ridge in front of the mountains, before its waves.
+const RIDGE: f32 = 64.0;
 const GOLD: Color = Color::new(1.0, 0.82, 0.3, 1.0);
 const PANEL: Color = Color::new(0.06, 0.05, 0.09, 0.82);
 
@@ -1065,7 +1067,11 @@ impl Renderer {
         self.draw_clouds(art, sw, ground, 0.04, 5.0, 0.9, 7, 11);
         // Far to near: each layer moves a little more with the camera than the
         // last. Painted mountains when the art is there, drawn ridges otherwise.
-        if !self.draw_strip(art, "mountains_far", sw, ground + 6.0, 200.0, 0.08) {
+        // NOTE: the ranges stand just under the lowest dip of the green ridge
+        // (RIDGE * 0.23): any lower and the hill hides their foothills, any
+        // higher and sky shows under their flat bases.
+        let base = ground - RIDGE * 0.23 + 4.0;
+        if !self.draw_strip(art, "mountains_far", sw, base, 200.0, 0.08) {
             self.draw_ridge(
                 art,
                 sw,
@@ -1078,7 +1084,7 @@ impl Renderer {
             );
         }
         self.draw_clouds(art, sw, ground, 0.12, 11.0, 0.6, 5, 12);
-        if !self.draw_strip(art, "mountains_near", sw, ground + 6.0, 150.0, 0.22) {
+        if !self.draw_strip(art, "mountains_near", sw, base, 150.0, 0.22) {
             self.draw_ridge(
                 art,
                 sw,
@@ -1095,7 +1101,7 @@ impl Renderer {
             sw,
             ground,
             0.45,
-            85.0,
+            RIDGE,
             Color::new(0.43, 0.66, 0.38, 1.0),
             3,
             true,

@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from scipy import ndimage
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -373,9 +373,9 @@ MEDIUM = (
 
 def max_side(name: str) -> int:
     # The sky draws the mountain ranges ~200 px tall across the whole screen;
-    # shrinking them made the sky a 5x-stretched blur. Keep the source size.
+    # shrinking them made the sky a 5x-stretched blur. Keep them at full size.
     if name.startswith("mountains_"):
-        return 1024
+        return 2048
     if name in BIG:
         return 256
     if name.startswith("monster_"):
@@ -407,6 +407,23 @@ def shrink(img: Image.Image, side: int) -> Image.Image:
         return img
     size = (max(1, round(img.width * scale)), max(1, round(img.height * scale)))
     return img.resize(size, Image.Resampling.LANCZOS)
+
+
+def enlarge(img: Image.Image) -> Image.Image:
+    """Doubles a painting and sharpens it, for art drawn larger than it was painted.
+
+    The mountain ranges are ~150 px tall on the sheet and ~400 px tall on a
+    Retina screen. Left to the GPU that is a 2.7x bilinear stretch, which reads
+    as blur; Lanczos plus an unsharp mask keeps the edges of the brushwork.
+    """
+    size = (img.width * 2, img.height * 2)
+    # NOTE: resize premultiplied, or the transparent black around the range
+    # bleeds into its outline as a dark fringe.
+    big = img.convert("RGBa").resize(size, Image.Resampling.LANCZOS).convert("RGBA")
+    rgb = big.convert("RGB").filter(
+        ImageFilter.UnsharpMask(radius=1.6, percent=140, threshold=2)
+    )
+    return Image.merge("RGBA", (*rgb.split(), big.getchannel("A")))
 
 
 def on_shared_canvas(frames: list[Image.Image]) -> list[Image.Image]:
@@ -453,6 +470,8 @@ def main() -> None:
             else [cuts[names[0]]]
         )
         for name, frame in zip(names, frames):
+            if name.startswith("mountains_"):
+                frame = enlarge(frame)
             shrink(frame, max_side(name)).save(OUT / f"{name}.png")
 
 
