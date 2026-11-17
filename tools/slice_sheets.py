@@ -115,6 +115,9 @@ LOADERS = {
     "ruins_mayan.jpg": from_white_jpeg,
     "ruins_civ_dark.png": from_png,
     "parallax.jpg": from_parallax,
+    # The white windows cut through these cave layers are the holes the layer
+    # behind shows through.
+    "cave_parallax.jpg": from_white_jpeg,
 }
 
 # NOTE: light-grey smoke and dust come out as faint black puffs under the
@@ -397,9 +400,17 @@ STRIPS = {
     "cave_backgrounds.jpg": {
         "cave_bg_0": (34, 30, 1166, 183),
         "cave_bg_1": (34, 205, 1166, 357),
-        "cave_bg_2": (34, 379, 1166, 531),
         "cave_bg_3": (34, 553, 1166, 704),
         "cave_bg_4": (34, 726, 1166, 875),
+    },
+    # The flooded-ruins band's wall with its ruins lifted off onto a front
+    # layer, and front layers of rock, trunks and crystal for three more bands.
+    "cave_parallax.jpg": {
+        "cave_bg_2": (34, 30, 1166, 183),
+        "cave_fg_2": (34, 210, 1166, 363),
+        "cave_fg_1": (34, 384, 1166, 534),
+        "cave_fg_3": (34, 553, 1166, 704),
+        "cave_fg_4": (34, 726, 1166, 875),
     },
 }
 
@@ -516,7 +527,7 @@ def max_side(name: str) -> int:
     # shrinking them made the sky a 5x-stretched blur. Keep them at full size.
     # NOTE: 2040, not 2048: the atlas is 2048 wide and pads each sprite, and
     # one that doesn't fit is silently left out of the game.
-    if name.startswith(("mountains_", "cave_bg_")):
+    if name.startswith(("mountains_", "cave_bg_", "cave_fg_")):
         return 2040
     if name.startswith(("ruin_", "pod_")):
         return 256

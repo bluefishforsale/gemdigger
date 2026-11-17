@@ -881,6 +881,7 @@ impl Renderer {
 
         clear_background(Color::new(0.02, 0.02, 0.04, 1.0));
         self.draw_sky(art, sw);
+        self.draw_cave_layers(art, sw, sh);
         self.draw_surface_trees(game, art, sw);
         self.draw_tiles(game, art, sw, sh);
         self.draw_shop(art);
@@ -1225,7 +1226,9 @@ impl Renderer {
                 let variant = world::hash(seed, tx, ty, 5) % 3;
                 let sprite = match tile {
                     Tile::Air => {
-                        self.draw_cave_wall(art, p, tx, ty, variant);
+                        if ty == 0 {
+                            self.draw_turf(art, p, variant);
+                        }
                         continue;
                     }
                     Tile::Wall => {
@@ -1269,46 +1272,89 @@ impl Renderer {
         }
     }
 
-    /// The back wall of a dug-out tile: its square of the depth band's cave
-    /// painting, so open space reads as a cave, not a flat hole.
-    fn draw_cave_wall(&self, art: &Art, p: Vec2, tx: i32, ty: i32, variant: u64) {
-        /// Rows of tiles one copy of a painting covers.
-        const ROWS: i32 = 6;
-        let band = world::band(ty);
-        let Some(s) = art.get(&format!("cave_bg_{band}")) else {
-            art.rect(p.x, p.y, TILE, TILE, mix(BAND_COLORS[band], BLACK, 0.72));
+    /// The painted cave behind everything underground: a back wall for each
+    /// depth band and, where the art has one, a front layer with windows cut
+    /// through it. NOTE: both go across the whole screen and the solid tiles
+    /// are drawn over them, so open space is just where no tile was drawn.
+    /// Each layer trails the camera by a different amount, and that lag is
+    /// what makes the cave look deep.
+    fn draw_cave_layers(&self, art: &Art, sw: f32, sh: f32) {
+        let ground = self.screen(0.0, 0.0).y;
+        let starts = world::BAND_STARTS;
+        for (band, &start) in starts.iter().enumerate() {
+            let top = (ground + start as f32 * TILE).max(0.0);
+            let bottom = starts
+                .get(band + 1)
+                .map_or(sh, |&next| (ground + next as f32 * TILE).min(sh));
+            if top >= bottom {
+                continue;
+            }
+            match art.get(&format!("cave_bg_{band}")) {
+                Some(s) => {
+                    let dim = Color::new(0.5, 0.5, 0.55, 1.0);
+                    self.draw_cave_layer(s, sw, top, bottom, 0.7, dim);
+                }
+                None => {
+                    let flat = mix(BAND_COLORS[band], BLACK, 0.72);
+                    art.rect(0.0, top, sw, bottom - top, flat);
+                }
+            }
+            if let Some(s) = art.get(&format!("cave_fg_{band}")) {
+                let dim = Color::new(0.72, 0.72, 0.76, 1.0);
+                self.draw_cave_layer(s, sw, top, bottom, 0.9, dim);
+            }
+        }
+    }
+
+    /// One cave painting repeated over screen rows `top` to `bottom`, moving
+    /// at `pace` times the camera's speed.
+    fn draw_cave_layer(&self, s: Sprite, sw: f32, top: f32, bottom: f32, pace: f32, tint: Color) {
+        const HEIGHT: f32 = 6.0 * TILE;
+        let width = HEIGHT * s.size().x / s.size().y;
+        let scroll = self.view * pace;
+        let mut row = ((top + scroll.y) / HEIGHT).floor() as i64;
+        loop {
+            let y = row as f32 * HEIGHT - scroll.y;
+            if y >= bottom {
+                break;
+            }
+            // Only the part of this copy inside the band is drawn, so two
+            // bands' paintings meet on a clean line.
+            let (y0, y1) = (y.max(top), (y + HEIGHT).min(bottom));
+            let src = Rect::new(
+                s.src.x,
+                s.src.y + (y0 - y) / HEIGHT * s.src.h,
+                s.src.w,
+                (y1 - y0) / HEIGHT * s.src.h,
+            );
+            let piece = Sprite { tex: s.tex, src };
+            // Every other row starts partway along, so stacked copies don't
+            // line up into columns.
+            let x_scroll = scroll.x + row.rem_euclid(2) as f32 * width * 0.37;
+            // NOTE: the paintings aren't made to repeat, so every other copy
+            // is mirrored, the same trick the mountain ranges use.
+            let mut i = (x_scroll / width).floor() as i64;
+            let mut x = i as f32 * width - x_scroll;
+            while x < sw {
+                piece.draw_ex(x, y0, width + 1.0, y1 - y0, tint, i.rem_euclid(2) == 1, 0.0);
+                x += width;
+                i += 1;
+            }
+            row += 1;
+        }
+    }
+
+    /// A dug-out surface tile keeps its turf along the top, so the grass line
+    /// carries on across a pit instead of stopping dead at its edge.
+    fn draw_turf(&self, art: &Art, p: Vec2, variant: u64) {
+        const TURF: f32 = 0.2;
+        let Some(g) = art.get(&format!("grass_{variant}")) else {
             return;
         };
-        let cols = (ROWS as f32 * s.size().x / s.size().y) as i32;
-        // NOTE: the paintings aren't made to repeat, so every other copy is
-        // mirrored, the same trick the mountain ranges use.
-        let across = tx.rem_euclid(2 * cols);
-        let (col, flip) = if across < cols {
-            (across, false)
-        } else {
-            (2 * cols - 1 - across, true)
-        };
-        let (w, h) = (s.src.w / cols as f32, s.src.h / ROWS as f32);
-        let src = Rect::new(
-            s.src.x + col as f32 * w,
-            s.src.y + ty.rem_euclid(ROWS) as f32 * h,
-            w,
-            h,
-        );
-        // Dimmed, so the wall sits behind the rock around it.
-        let dim = Color::new(0.62, 0.62, 0.66, 1.0);
-        Sprite { tex: s.tex, src }.draw_ex(p.x, p.y, TILE, TILE, dim, flip, 0.0);
-        // A dug-out surface tile keeps its turf along the top, so the grass
-        // line carries on across the pit instead of stopping dead at its edge.
-        if ty == 0
-            && let Some(g) = art.get(&format!("grass_{variant}"))
-        {
-            const TURF: f32 = 0.2;
-            let pad = TILE * 0.06;
-            let src = Rect::new(g.src.x, g.src.y, g.src.w, g.src.h * TURF);
-            let size = TILE + 2.0 * pad;
-            Sprite { tex: g.tex, src }.draw(p.x - pad, p.y - pad, size, size * TURF, WHITE);
-        }
+        let pad = TILE * 0.06;
+        let src = Rect::new(g.src.x, g.src.y, g.src.w, g.src.h * TURF);
+        let size = TILE + 2.0 * pad;
+        Sprite { tex: g.tex, src }.draw(p.x - pad, p.y - pad, size, size * TURF, WHITE);
     }
 
     /// Buried ruins, each standing on the floor of its chamber.
