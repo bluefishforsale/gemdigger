@@ -140,6 +140,88 @@ fn in_outpost_cavern(seed: u64, x: i32, y: i32) -> bool {
     })
 }
 
+/// Side of the square cells the mine is divided into. Each holds at most one
+/// den or crate, which is what keeps both rare.
+pub const CELL: i32 = 32;
+/// Width and height of a den, in tiles.
+pub const DEN_SIZE: (i32, i32) = (3, 2);
+/// Nothing is sealed in the rock above this row.
+const POCKET_MIN_DEPTH: i32 = 12;
+const DEN_CHANCE: f32 = 0.3;
+/// Twice the den chance: crates are half as rare as dens.
+const CRATE_CHANCE: f32 = 0.6;
+
+/// A small hollow sealed in the rock until something digs into it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pocket {
+    /// A cave critters live in; (x, y) is its top-left tile.
+    Den { x: i32, y: i32 },
+    /// A supply crate in a hollow one tile big.
+    Crate { x: i32, y: i32 },
+}
+
+impl Pocket {
+    /// Top-left tile, then width and height.
+    fn rect(self) -> (i32, i32, i32, i32) {
+        match self {
+            Pocket::Den { x, y } => (x, y, DEN_SIZE.0, DEN_SIZE.1),
+            Pocket::Crate { x, y } => (x, y, 1, 1),
+        }
+    }
+
+    fn contains(self, tx: i32, ty: i32) -> bool {
+        let (x, y, w, h) = self.rect();
+        (x..x + w).contains(&tx) && (y..y + h).contains(&ty)
+    }
+}
+
+/// The cell a tile belongs to.
+pub fn cell_of(x: i32, y: i32) -> (i32, i32) {
+    (x.div_euclid(CELL), y.div_euclid(CELL))
+}
+
+fn raw_pocket(seed: u64, cx: i32, cy: i32) -> Option<Pocket> {
+    if !(0..WIDTH / CELL).contains(&cx) || cy < 0 {
+        return None;
+    }
+    let h = hash(seed, cx, cy, 60);
+    let r = unit(h);
+    if r >= DEN_CHANCE + CRATE_CHANCE {
+        return None;
+    }
+    let den = r < DEN_CHANCE;
+    let (w, rows) = if den { DEN_SIZE } else { (1, 1) };
+    // One tile in from the cell's edge on every side, so pockets never touch
+    // each other or the walls of the mine.
+    let x = cx * CELL + 1 + ((h >> 8) % (CELL - w - 1) as u64) as i32;
+    let y = cy * CELL + 1 + ((h >> 16) % (CELL - rows - 1) as u64) as i32;
+    if y < POCKET_MIN_DEPTH {
+        return None;
+    }
+    Some(if den {
+        Pocket::Den { x, y }
+    } else {
+        Pocket::Crate { x, y }
+    })
+}
+
+/// The den or crate in cell (cx, cy), if it has one. NOTE: `generate` lets an
+/// outpost win any overlap, so a pocket touching one is dropped here; without
+/// that the game would look for a crate inside an outpost's floor.
+pub fn pocket(seed: u64, cx: i32, cy: i32) -> Option<Pocket> {
+    let p = raw_pocket(seed, cx, cy)?;
+    let (x, y, w, h) = p.rect();
+    let clear = (y..y + h).all(|ty| {
+        (x..x + w).all(|tx| !in_outpost_cavern(seed, tx, ty) && !is_outpost_floor(seed, tx, ty))
+    });
+    clear.then_some(p)
+}
+
+fn in_pocket(seed: u64, x: i32, y: i32) -> bool {
+    let (cx, cy) = cell_of(x, y);
+    raw_pocket(seed, cx, cy).is_some_and(|p| p.contains(x, y))
+}
+
 fn in_tunnel(seed: u64, x: i32, y: i32) -> bool {
     if y < 40 {
         return false;
@@ -181,7 +263,7 @@ fn generate(seed: u64, x: i32, y: i32) -> Tile {
     if is_outpost_floor(seed, x, y) {
         return Tile::Dirt;
     }
-    if in_tunnel(seed, x, y) {
+    if in_tunnel(seed, x, y) || in_pocket(seed, x, y) {
         return Tile::Air;
     }
     let d = y as f32;
@@ -384,6 +466,59 @@ mod tests {
                 last = (x, y);
             }
         }
+    }
+
+    /// A den or crate the game is told about must really be a hollow in the
+    /// rock, below the quiet top rows, or its critters and loot sit in dirt.
+    #[test]
+    fn pockets_are_hollow_and_below_the_top_rows() {
+        for seed in 0..10 {
+            let w = World::new(seed);
+            for cy in 0..40 {
+                for cx in 0..WIDTH / CELL {
+                    let Some(p) = pocket(seed, cx, cy) else {
+                        continue;
+                    };
+                    let (x, y, pw, ph) = p.rect();
+                    assert!(y >= POCKET_MIN_DEPTH, "seed {seed}: {p:?} too shallow");
+                    assert_eq!(cell_of(x, y), (cx, cy), "seed {seed}: {p:?} left its cell");
+                    for ty in y..y + ph {
+                        for tx in x..x + pw {
+                            assert_eq!(w.get(tx, ty), Tile::Air, "seed {seed}: {p:?} not hollow");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Dens stay rare, about one cell in three, and crates turn up about
+    /// twice as often.
+    #[test]
+    fn dens_are_rare_and_crates_twice_as_common() {
+        let (mut dens, mut crates, mut cells) = (0, 0, 0);
+        for seed in 0..10 {
+            for cy in 1..60 {
+                for cx in 0..WIDTH / CELL {
+                    cells += 1;
+                    match pocket(seed, cx, cy) {
+                        Some(Pocket::Den { .. }) => dens += 1,
+                        Some(Pocket::Crate { .. }) => crates += 1,
+                        None => {}
+                    }
+                }
+            }
+        }
+        let den_share = dens as f32 / cells as f32;
+        let ratio = crates as f32 / dens as f32;
+        assert!(
+            (0.25..0.35).contains(&den_share),
+            "{dens} dens in {cells} cells"
+        );
+        assert!(
+            (1.8..2.2).contains(&ratio),
+            "{crates} crates to {dens} dens"
+        );
     }
 
     #[test]

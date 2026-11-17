@@ -21,7 +21,7 @@ pub fn default_path() -> Option<PathBuf> {
 #[derive(Debug)]
 pub enum Loaded {
     Fresh,
-    Resumed(SaveData),
+    Resumed(Box<SaveData>),
     /// The save didn't parse; it was moved aside to `backup` instead of overwritten.
     Corrupt {
         backup: PathBuf,
@@ -39,7 +39,7 @@ pub fn load(path: &Path) -> anyhow::Result<Loaded> {
     let parsed = serde_json::from_slice::<SaveData>(&bytes)
         .or_else(|_| serde_json::from_slice::<SaveDataV1>(&bytes).map(SaveData::from));
     match parsed {
-        Ok(data) => Ok(Loaded::Resumed(data)),
+        Ok(data) => Ok(Loaded::Resumed(Box::new(data))),
         Err(_) => {
             let backup = path.with_extension("json.corrupt");
             fs::rename(path, &backup).with_context(|| {
@@ -93,7 +93,7 @@ mod tests {
         let Loaded::Resumed(back) = load(&path).unwrap() else {
             panic!("save did not load");
         };
-        assert_eq!(back, data);
+        assert_eq!(*back, data);
         assert!(
             !path.with_extension("json.tmp").exists(),
             "temp file left behind"

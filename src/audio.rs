@@ -168,7 +168,7 @@ impl Audio {
                 Event::Dug { .. } => self.play("dug", 0.5),
                 Event::Pickup { item, .. } => match item {
                     Item::Gem(t) => self.play(&format!("pickup_{t}"), 0.8),
-                    Item::Mineral(_) => self.play("clink", 0.7),
+                    Item::Mineral(_) | Item::Meat => self.play("clink", 0.7),
                 },
                 Event::Crafted => self.play("craft", 0.9),
                 Event::BoughtGun(_) => self.play("buy", 0.7),
@@ -203,6 +203,9 @@ impl Audio {
                 Event::MonsterEmerged { size, .. } => self.play(&growl_name(*size), 0.9),
                 Event::StashRecovered { .. } => self.play("stash", 0.9),
                 Event::DigStarted { .. } => {}
+                Event::CritterKilled { .. } => self.play("hit", 0.5),
+                Event::CrateOpened { .. } => self.play("stash", 0.9),
+                Event::CrateKeptShut => self.play("deny", 0.6),
             }
         }
     }

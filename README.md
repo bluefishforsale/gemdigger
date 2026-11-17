@@ -66,7 +66,8 @@ Losing the pod isn't the end: you start again at your nearest base, or the surfa
 - Upgrades for drill, fuel tank, cargo hold, hull and lamp
 - Craft bombs from Coal, Sulfur and Potassium to blast through boulders and monsters
 - A painted sky with mountains, drifting clouds, trees and birds
-- Caves full of crystals, glowing mushrooms, bones and wandering critters
+- Rare critter dens sealed in the rock: dig one open and they come out biting, and a shot critter drops meat to sell
+- Supply crates hidden in the rock, usually a bomb, once in a long while a gun or a full tank
 - Saves automatically, so you always pick up where you left off
 - An Esc menu with settings for music, sound effects, screen shake and full screen, plus New game to start over on a freshly rolled map
 

@@ -120,6 +120,7 @@ sprites!(
     "energy_cell_0",
     "energy_cell_1",
     "energy_cell_2",
+    "meat",
     "relic_coin",
     "relic_rune",
     "pickaxe_0",
