@@ -97,6 +97,21 @@ def from_parallax(path: Path) -> np.ndarray:
     return unblend_white(rgb, a)
 
 
+# Rows of the soil wall on topsoil.jpg, the one strip there with no paper in it.
+TOPSOIL_WALL = (30, 332)
+
+
+def from_topsoil(path: Path) -> np.ndarray:
+    # NOTE: thin roots and grass blades in soft watercolour. A flood fill from
+    # the border leaves the paper trapped between roots as white patches and a
+    # pale rim on every root, so coverage is read off the distance from white.
+    rgb = np.array(Image.open(path).convert("RGB")).astype(np.float32)
+    a = np.clip((247 - rgb.min(axis=2)) / 70, 0, 1)
+    # Pale pebbles in the wall are paint, not paper.
+    a[slice(*TOPSOIL_WALL)] = 1
+    return unblend_white(rgb, a)
+
+
 def unblend_white(rgb: np.ndarray, a: np.ndarray) -> np.ndarray:
     safe = np.maximum(a, 1e-3)[..., None]
     col = np.clip((rgb - 255 * (1 - a[..., None])) / safe, 0, 255)
@@ -118,6 +133,7 @@ LOADERS = {
     # The white windows cut through these cave layers are the holes the layer
     # behind shows through.
     "cave_parallax.jpg": from_white_jpeg,
+    "topsoil.jpg": from_topsoil,
 }
 
 # NOTE: light-grey smoke and dust come out as faint black puffs under the
@@ -412,7 +428,18 @@ STRIPS = {
         "cave_fg_3": (34, 553, 1166, 704),
         "cave_fg_4": (34, 726, 1166, 875),
     },
+    # What sits right under the grass: lit soil darkening into the root wall,
+    # loose roots to hang in front of it, and the sod along the lip of a pit.
+    "topsoil.jpg": {
+        "topsoil_bg": (30, 30, 1234, 332),
+        "topsoil_fg": (30, 371, 1234, 590),
+        "turf_lip": (30, 650, 1234, 820),
+    },
 }
+# Share of a strip's height, from the bottom, over which it fades to nothing.
+# NOTE: the soil ends dark but not as dark as the root wall under it; cut
+# square, the join shows as a line across every pit.
+FADE_OUT = {"topsoil_bg": 0.35}
 
 SHEETS["pod.jpg"] = {
     "pod_0": (15, 3, 312, 212),
@@ -527,7 +554,7 @@ def max_side(name: str) -> int:
     # shrinking them made the sky a 5x-stretched blur. Keep them at full size.
     # NOTE: 2040, not 2048: the atlas is 2048 wide and pads each sprite, and
     # one that doesn't fit is silently left out of the game.
-    if name.startswith(("mountains_", "cave_bg_", "cave_fg_")):
+    if name.startswith(("mountains_", "cave_bg_", "cave_fg_", "topsoil_", "turf_lip")):
         return 2040
     if name.startswith(("ruin_", "pod_")):
         return 256
@@ -650,7 +677,12 @@ def main(only: list[str]) -> None:
         load = LOADERS.get(sheet, lambda path: np.array(Image.open(path).convert("RGBA")))
         rgba = load(ART / sheet)
         for name, (l, t, r, b) in strips.items():
-            cuts[name] = Image.fromarray(rgba[t:b, l:r])
+            strip = rgba[t:b, l:r].copy()
+            if name in FADE_OUT:
+                rows = round(strip.shape[0] * FADE_OUT[name])
+                ramp = np.linspace(1, 0, rows)[:, None]
+                strip[-rows:, :, 3] = (strip[-rows:, :, 3] * ramp).round()
+            cuts[name] = Image.fromarray(strip)
     groups: dict[str, list[str]] = {}
     for name in cuts:
         groups.setdefault(animation(name) or name, []).append(name)

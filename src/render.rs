@@ -885,6 +885,7 @@ impl Renderer {
         self.draw_surface_trees(game, art, sw);
         self.draw_tiles(game, art, sw, sh);
         self.draw_shop(art);
+        self.draw_turf(game, art, sw);
         self.draw_sites(game, art, sh);
         self.draw_stashes(game, art);
         self.draw_ruins(game, art, sw, sh);
@@ -1225,12 +1226,7 @@ impl Renderer {
                 let base = BAND_COLORS[band];
                 let variant = world::hash(seed, tx, ty, 5) % 3;
                 let sprite = match tile {
-                    Tile::Air => {
-                        if ty == 0 {
-                            self.draw_turf(art, p, variant);
-                        }
-                        continue;
-                    }
+                    Tile::Air => continue,
                     Tile::Wall => {
                         art.rect(p.x, p.y, TILE, TILE, Color::new(0.09, 0.08, 0.11, 1.0));
                         art.rect(
@@ -1242,15 +1238,12 @@ impl Renderer {
                         );
                         continue;
                     }
-                    Tile::Dirt if ty == 0 => format!("grass_{variant}"),
                     Tile::Dirt => format!("dirt_{band}_{variant}"),
                     Tile::Boulder => "boulder".to_string(),
                     Tile::Ore(t) => format!("ore_{t}"),
                     Tile::Mineral(_) => format!("dirt_{band}_{variant}"),
                 };
-                if ty > 0 || tile != Tile::Dirt {
-                    art.rect(p.x, p.y, TILE, TILE, base);
-                }
+                art.rect(p.x, p.y, TILE, TILE, base);
                 match art.get(&sprite) {
                     Some(sprite) => {
                         // Slight overlap hides the ragged painted edges between tiles.
@@ -1304,6 +1297,47 @@ impl Renderer {
                 self.draw_cave_layer(s, sw, top, bottom, 0.9, dim);
             }
         }
+        self.draw_topsoil(art, sw, ground);
+    }
+
+    /// The first rows under the grass: lit soil that darkens into the root
+    /// wall, and loose roots hanging in front of it. NOTE: both hang from the
+    /// ground line instead of trailing the camera up and down like the cave
+    /// layers. The soil is painted light at the top and dark at the bottom,
+    /// and that only reads right directly under the turf.
+    fn draw_topsoil(&self, art: &Art, sw: f32, ground: f32) {
+        const WIDTH: f32 = 24.0 * TILE;
+        let layers = [
+            ("topsoil_bg", 0.7, Color::new(0.85, 0.85, 0.85, 1.0)),
+            ("topsoil_fg", 0.9, Color::new(0.7, 0.7, 0.7, 1.0)),
+        ];
+        for (name, pace, tint) in layers {
+            let Some(s) = art.get(name) else {
+                continue;
+            };
+            let height = WIDTH * s.size().y / s.size().x;
+            if ground + height <= 0.0 {
+                continue;
+            }
+            let scroll = self.view.x * pace;
+            // Every other copy is mirrored, as in the cave layers, so the
+            // painting's two ends never have to match.
+            let mut i = (scroll / WIDTH).floor() as i64;
+            let mut x = i as f32 * WIDTH - scroll;
+            while x < sw {
+                s.draw_ex(
+                    x,
+                    ground,
+                    WIDTH + 1.0,
+                    height,
+                    tint,
+                    i.rem_euclid(2) == 1,
+                    0.0,
+                );
+                x += WIDTH;
+                i += 1;
+            }
+        }
     }
 
     /// One cave painting repeated over screen rows `top` to `bottom`, moving
@@ -1344,17 +1378,37 @@ impl Renderer {
         }
     }
 
-    /// A dug-out surface tile keeps its turf along the top, so the grass line
-    /// carries on across a pit instead of stopping dead at its edge.
-    fn draw_turf(&self, art: &Art, p: Vec2, variant: u64) {
-        const TURF: f32 = 0.2;
-        let Some(g) = art.get(&format!("grass_{variant}")) else {
+    /// The grass and sod along the top of the surface row, dug out or not, so
+    /// the meadow carries on across a pit instead of stopping dead at its
+    /// edge. Each tile shows its own slice of one long painting, so
+    /// neighbours join up. NOTE: this goes on after the tiles and the shop.
+    /// Drawn with its own tile, the next tile's overlap bites a notch out of
+    /// it, and under the shop the island painted into the shop's sprite would
+    /// break the line.
+    fn draw_turf(&self, game: &Game, art: &Art, sw: f32) {
+        /// Tiles one copy of the painting runs across.
+        const SPAN: i32 = 10;
+        /// How far down the painting the ground line is; blades stand above it.
+        const GROUND: f32 = 0.32;
+        let Some(lip) = art.get("turf_lip") else {
             return;
         };
-        let pad = TILE * 0.06;
-        let src = Rect::new(g.src.x, g.src.y, g.src.w, g.src.h * TURF);
-        let size = TILE + 2.0 * pad;
-        Sprite { tex: g.tex, src }.draw(p.x - pad, p.y - pad, size, size * TURF, WHITE);
+        let w = lip.src.w / SPAN as f32;
+        let h = TILE * SPAN as f32 * lip.src.h / lip.src.w;
+        let x0 = (self.view.x / TILE).floor() as i32;
+        let x1 = ((self.view.x + sw) / TILE).ceil() as i32;
+        for tx in x0..=x1 {
+            if game.world.get(tx, 0) == Tile::Wall {
+                continue;
+            }
+            // Every other copy is mirrored, so the painting's ends never meet.
+            let k = tx.rem_euclid(2 * SPAN);
+            let flip = k >= SPAN;
+            let slice = if flip { 2 * SPAN - 1 - k } else { k };
+            let src = Rect::new(lip.src.x + slice as f32 * w, lip.src.y, w, lip.src.h);
+            let p = self.screen(tx as f32, 0.0);
+            Sprite { tex: lip.tex, src }.draw_ex(p.x, p.y - h * GROUND, TILE, h, WHITE, flip, 0.0);
+        }
     }
 
     /// Buried ruins, each standing on the floor of its chamber.
