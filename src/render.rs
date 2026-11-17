@@ -2048,6 +2048,22 @@ impl Renderer {
             );
         }
         let p = to_map(game.pod.x, game.pod.y);
+        // An arrow off the pod toward the nearest place to refuel, since the
+        // gold squares pinned to the edge don't say which one is closest.
+        let (sx, sy) = game.nearest_site(game.pod.x, game.pod.y).landing();
+        let to_site = vec2(sx - game.pod.x, sy - game.pod.y);
+        if to_site.length() > 2.0 {
+            let d = to_site.normalize();
+            let side = vec2(-d.y, d.x) * 5.0;
+            let green = Color::new(0.45, 1.0, 0.55, 1.0);
+            draw_line(p.x, p.y, p.x + d.x * 10.0, p.y + d.y * 10.0, 2.0, green);
+            draw_triangle(
+                p + d * 19.0,
+                p + d * 10.0 + side,
+                p + d * 10.0 - side,
+                green,
+            );
+        }
         let blink = 0.6 + 0.4 * (self.t * 6.0).sin();
         draw_circle(p.x, p.y, 3.5, with_alpha(WHITE, blink));
         if pinging {
