@@ -127,6 +127,8 @@ pub struct Input {
     pub base: bool,
     /// Pressed this frame: teleport (needs a second press to confirm).
     pub teleport: bool,
+    /// Pressed this frame: self-destruct (needs a second press to confirm).
+    pub self_destruct: bool,
     /// Pressed this frame: sonar ping.
     pub ping: bool,
 }
@@ -611,6 +613,10 @@ pub enum Event {
         sacrificed: usize,
     },
     CantTeleport(&'static str),
+    SelfDestructArmed,
+    SelfDestructed {
+        lost: usize,
+    },
     Pinged,
     /// P pressed somewhere a base can't go; says why.
     CantBuild(&'static str),
@@ -679,6 +685,8 @@ pub struct Game {
     pub base_kits: u8,
     /// Seconds left to press T a second time.
     teleport_armed: f32,
+    /// Seconds left to press K a second time.
+    destruct_armed: f32,
     /// Seconds the radar keeps showing ore from the last ping.
     pub ping: f32,
     /// Seconds until she can ping again.
@@ -694,7 +702,7 @@ pub struct Game {
     pub stashes: Vec<Stash>,
     pub monsters: Vec<Monster>,
     pub critters: Vec<Critter>,
-    /// Cells whose den has emptied or whose crate has been opened.
+    /// Cells whose den has emptied, crate has been opened or ruin has been looted.
     spent: HashSet<(i32, i32)>,
     /// Whether the crate she's touching has already said it's staying shut.
     crate_refused: bool,
@@ -729,6 +737,7 @@ impl Game {
             bases: Vec::new(),
             base_kits: 0,
             teleport_armed: 0.0,
+            destruct_armed: 0.0,
             ping: 0.0,
             ping_cooldown: 0.0,
             laser: None,
@@ -851,6 +860,23 @@ impl Game {
         self.events.push(Event::Teleported { sacrificed });
     }
 
+    /// K twice: blow the pod up and start again at the surface shop. NOTE:
+    /// this is the one way out that asks for nothing, no fuel, no cargo, no
+    /// money, so no hole the player digs can be a dead end. The price is the
+    /// hold: it goes up with the pod instead of waiting as a stash.
+    fn self_destruct(&mut self) {
+        if self.destruct_armed <= 0.0 {
+            self.destruct_armed = 2.0;
+            self.events.push(Event::SelfDestructArmed);
+            return;
+        }
+        self.destruct_armed = 0.0;
+        let lost = self.cargo.len();
+        self.cargo.clear();
+        self.events.push(Event::SelfDestructed { lost });
+        self.respawn(None);
+    }
+
     fn deploy_base(&mut self) {
         if self.base_kits == 0 {
             return;
@@ -946,6 +972,10 @@ impl Game {
         }
         if input.teleport {
             self.teleport();
+        }
+        self.destruct_armed = (self.destruct_armed - dt).max(0.0);
+        if input.self_destruct {
+            self.self_destruct();
         }
         self.update_bombs(dt);
         self.update_guns(dt, input);
@@ -1256,19 +1286,21 @@ impl Game {
             true
         });
         for r in found {
-            self.levels.add_relic(r);
-            // The new headroom arrives full, like a bought upgrade.
-            match r {
-                Relic::ReserveTank => {
-                    self.pod.fuel = (self.pod.fuel + 15.0).min(self.levels.fuel_max())
-                }
-                Relic::Plating => {
-                    self.pod.hull = (self.pod.hull + 15.0).min(self.levels.hull_max())
-                }
-                _ => {}
-            }
-            self.events.push(Event::RelicFound(r));
+            self.claim_relic(r);
         }
+    }
+
+    fn claim_relic(&mut self, r: Relic) {
+        self.levels.add_relic(r);
+        // The new headroom arrives full, like a bought upgrade.
+        match r {
+            Relic::ReserveTank => {
+                self.pod.fuel = (self.pod.fuel + 15.0).min(self.levels.fuel_max())
+            }
+            Relic::Plating => self.pod.hull = (self.pod.hull + 15.0).min(self.levels.hull_max()),
+            _ => {}
+        }
+        self.events.push(Event::RelicFound(r));
     }
 
     fn update_guns(&mut self, dt: f32, input: Input) {
@@ -1577,15 +1609,25 @@ impl Game {
             cause,
             dropped,
         });
-        self.pod = Pod::fresh(&self.levels);
         // Back at the base nearest to where she fell, if she's built any.
-        if let Some(b) = self.bases.iter().min_by(|a, b| {
-            (a.x - x)
-                .hypot(a.floor as f32 - y)
-                .total_cmp(&(b.x - x).hypot(b.floor as f32 - y))
-        }) {
-            self.pod.x = b.x;
-            self.pod.y = b.floor as f32 - POD_HALF - EPS;
+        let base = self
+            .bases
+            .iter()
+            .min_by(|a, b| {
+                (a.x - x)
+                    .hypot(a.floor as f32 - y)
+                    .total_cmp(&(b.x - x).hypot(b.floor as f32 - y))
+            })
+            .map(|b| (b.x, b.floor as f32 - POD_HALF - EPS));
+        self.respawn(base);
+    }
+
+    /// A fresh pod at `spot`, or at the surface shop.
+    fn respawn(&mut self, spot: Option<(f32, f32)>) {
+        self.pod = Pod::fresh(&self.levels);
+        if let Some((x, y)) = spot {
+            self.pod.x = x;
+            self.pod.y = y;
         }
         self.pod.invuln = 2.0;
         self.monsters.clear();
@@ -1611,7 +1653,7 @@ impl Game {
     /// stuck forever, so after a moment the pod is quietly brought to the
     /// shop with a quarter tank. No message: the game just carries on.
     fn tow_if_stranded(&mut self, dt: f32) {
-        let stranded = self.pod.y <= 1.0
+        let stranded = self.pod.y <= 0.0
             && self.pod.fuel <= 0.0
             && self.money == 0
             && self.cargo_value() + self.mineral_value() == 0;
@@ -1656,7 +1698,10 @@ impl Game {
 
     fn check_fuel(&mut self, dt: f32) {
         self.tow_if_stranded(dt);
-        let underground = self.pod.y > 1.0;
+        // NOTE: on the grass the pod's centre sits above row 0, and anywhere
+        // lower it is in a hole it can't leave without fuel. Draw the line a
+        // row further down and a pit one tile deep is a trap.
+        let underground = self.pod.y > 0.0;
         if self.pod.fuel <= 0.0 && underground {
             self.die("Ran out of fuel".into());
             return;
@@ -1809,16 +1854,14 @@ impl Game {
         }
     }
 
-    /// Dens and crates not yet used up, in the cells within `reach` tiles of (x, y).
+    /// Every den, crate and ruin in the cells within `reach` tiles of (x, y),
+    /// used up or not.
     fn pockets_near(&self, x: f32, y: f32, reach: f32) -> Vec<((i32, i32), Pocket)> {
         let (cx0, cy0) = world::cell_of((x - reach).floor() as i32, (y - reach).floor() as i32);
         let (cx1, cy1) = world::cell_of((x + reach).floor() as i32, (y + reach).floor() as i32);
         let mut out = Vec::new();
         for cy in cy0..=cy1 {
             for cx in cx0..=cx1 {
-                if self.spent.contains(&(cx, cy)) {
-                    continue;
-                }
                 if let Some(p) = world::pocket(self.world.seed, cx, cy) {
                     out.push(((cx, cy), p));
                 }
@@ -1831,11 +1874,29 @@ impl Game {
     pub fn crates_near(&self, x: f32, y: f32, reach: f32) -> Vec<(i32, i32)> {
         self.pockets_near(x, y, reach)
             .into_iter()
-            .filter_map(|(_, p)| match p {
-                Pocket::Crate { x, y } => Some((x, y)),
-                Pocket::Den { .. } => None,
+            .filter_map(|(cell, p)| match p {
+                Pocket::Crate { x, y } if !self.spent.contains(&cell) => Some((x, y)),
+                _ => None,
             })
             .collect()
+    }
+
+    /// The ruins in the cells within `reach` tiles of (x, y): each one's
+    /// top-left tile, and whether its relic is still there.
+    pub fn ruins_near(&self, x: f32, y: f32, reach: f32) -> Vec<(i32, i32, bool)> {
+        self.pockets_near(x, y, reach)
+            .into_iter()
+            .filter_map(|(cell, p)| match p {
+                Pocket::Ruin { x, y } => Some((x, y, !self.spent.contains(&cell))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Where the relic of the ruin at (x, y) rests: mid-chamber, on the floor.
+    pub fn ruin_relic_at(x: i32, y: i32) -> (f32, f32) {
+        let (w, h) = world::RUIN_SIZE;
+        (x as f32 + w as f32 / 2.0, (y + h) as f32 - 0.5)
     }
 
     /// Whether anything has broken through to the den whose top-left is (x, y).
@@ -1877,13 +1938,24 @@ impl Game {
         }
     }
 
-    /// Wakes any den that's been opened near the pod, and opens the crate
-    /// she's touching.
+    /// Wakes any den that's been opened near the pod, opens the crate she's
+    /// touching, and claims the relic of a ruin she's reached.
     fn update_pockets(&mut self) {
         let (px, py) = (self.pod.x, self.pod.y);
         let mut touching = None;
         for (cell, pocket) in self.pockets_near(px, py, DEN_REACH) {
+            if self.spent.contains(&cell) {
+                continue;
+            }
             match pocket {
+                Pocket::Ruin { x, y } => {
+                    let (rx, ry) = Game::ruin_relic_at(x, y);
+                    if (rx - px).hypot(ry - py) < 0.9 {
+                        self.spent.insert(cell);
+                        let h = world::hash(self.world.seed, x, y, 63);
+                        self.claim_relic(Relic::ALL[(h % Relic::ALL.len() as u64) as usize]);
+                    }
+                }
                 Pocket::Den { x, y } => {
                     if self.den_is_open(x, y) {
                         self.spent.insert(cell);
@@ -2391,6 +2463,26 @@ mod tests {
         let events = g.update(DT, Input::default());
         assert!(events.iter().any(|e| matches!(e, Event::Died { .. })));
         assert_eq!(g.pod.fuel, g.levels.fuel_max());
+    }
+
+    /// A pit one tile deep is underground too. With no fuel she can neither
+    /// fly out nor dig, and with money in hand nobody tows her, so she sat
+    /// there for good.
+    #[test]
+    fn out_of_fuel_in_a_one_tile_pit_respawns() {
+        let mut g = Game::new(1);
+        let tx = SHOP_COLUMNS.0 as i32 - 40;
+        g.world.set(tx, 0, Tile::Air);
+        g.pod.x = tx as f32 + 0.5;
+        g.pod.y = 1.0 - POD_HALF - 0.001;
+        g.pod.fuel = 0.0;
+        g.money = 70;
+        let events = run(&mut g, 3.0, Input::default());
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Died { .. })),
+            "still stuck at {:?}",
+            (g.pod.x, g.pod.y)
+        );
     }
 
     #[test]
@@ -2995,6 +3087,45 @@ mod tests {
         );
     }
 
+    /// Self-destruct is the way out of any hole: two presses, the cargo is
+    /// gone for good, and she starts again at the surface shop with a full
+    /// tank, even with a base nearer and an empty hold.
+    #[test]
+    fn self_destruct_loses_the_cargo_and_restarts_at_the_surface_shop() {
+        let mut g = game_at_depth(300);
+        g.bases.push(Base { x: 6.5, floor: 301 });
+        g.cargo = vec![Item::Gem(0), Item::Gem(1)];
+        g.pod.fuel = 0.5;
+        let tap = Input {
+            self_destruct: true,
+            ..Input::default()
+        };
+        g.update(DT, tap);
+        assert_eq!(g.depth().round(), 301.0, "went off on the first press");
+        assert_eq!(g.cargo.len(), 2, "cargo lost on the first press");
+        let events = g.update(DT, tap);
+        assert!(
+            events.contains(&Event::SelfDestructed { lost: 2 }),
+            "no self-destruct in {events:?}"
+        );
+        assert!(g.cargo.is_empty(), "cargo survived");
+        assert!(g.stashes.is_empty(), "cargo was left as a stash");
+        assert!(
+            (g.pod.x - SPAWN.0).abs() < 0.01 && (g.pod.y - SPAWN.1).abs() < 0.05,
+            "not at the surface shop: {:?}",
+            (g.pod.x, g.pod.y)
+        );
+        assert_eq!(g.pod.fuel, g.levels.fuel_max());
+
+        let mut g = game_at_depth(300);
+        g.update(DT, tap);
+        let events = g.update(DT, tap);
+        assert!(
+            events.contains(&Event::SelfDestructed { lost: 0 }),
+            "an empty hold blocked it: {events:?}"
+        );
+    }
+
     /// Bases and kits survive a save round trip.
     #[test]
     fn saves_keep_bases_and_kits() {
@@ -3423,6 +3554,39 @@ mod tests {
         assert!(
             !back.crates_near(x as f32, y as f32, 2.0).contains(&(x, y)),
             "opened crate came back after reload"
+        );
+    }
+
+    /// A ruin's relic is claimed once by reaching it, and stays claimed
+    /// through a save, or every reload would hand out another.
+    #[test]
+    fn a_ruin_gives_its_relic_once() {
+        let mut g = Game::new(11);
+        g.monster_timer = f32::INFINITY;
+        let (x, y) = (1..400)
+            .flat_map(|cy| (1..WIDTH / world::CELL).map(move |cx| (cx, cy)))
+            .find_map(|(cx, cy)| match world::pocket(11, cx, cy) {
+                Some(Pocket::Ruin { x, y }) => Some((x, y)),
+                _ => None,
+            })
+            .expect("no ruin in 400 rows of cells");
+        assert_eq!(g.ruins_near(x as f32, y as f32, 2.0), vec![(x, y, true)]);
+        let (rx, ry) = Game::ruin_relic_at(x, y);
+        park(&mut g, rx.floor() as i32, ry.floor() as i32);
+        let events = run(&mut g, 0.5, Input::default());
+        let found = events
+            .iter()
+            .filter(|e| matches!(e, Event::RelicFound(_)))
+            .count();
+        assert_eq!(found, 1, "relic claimed {found} times");
+        assert_eq!(g.levels.relics(), 1);
+        let back = Game::from_save(
+            serde_json::from_str(&serde_json::to_string(&g.to_save()).unwrap()).unwrap(),
+        );
+        assert_eq!(
+            back.ruins_near(x as f32, y as f32, 2.0),
+            vec![(x, y, false)],
+            "looted ruin refilled after reload"
         );
     }
 

@@ -6,7 +6,7 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 use macroquad::prelude::*;
 use macroquad::rand::gen_range;
 
-use crate::art::Art;
+use crate::art::{Art, Sprite};
 use crate::critters;
 use crate::game::{
     BASE_KIT_PRICE, BOMB_POUCH, Event, FUSE, Game, Gun, Item, Loot, MAX_BASE_KITS, MAX_LEVEL,
@@ -283,12 +283,48 @@ fn draw_tree(x: f32, base: f32, s: f32, kind: u64, shade: f32) {
     }
 }
 
+/// A set of painted strips that tile along the surface.
+struct Shuffled {
+    /// Sprites are `<name>_0` up to `<name>_<count - 1>`.
+    name: &'static str,
+    count: i64,
+    /// Share of a strip's height that stands above the ground line.
+    lift: f32,
+    /// How fast it moves sideways, as a share of the camera's speed.
+    pace: f32,
+    tint: Color,
+}
+
+/// Share of a strip's width that overlaps the one before it. NOTE: the same
+/// number as SEAM in tools/slice_sheets.py, which fades each strip in over
+/// exactly this much. Change one alone and the surface shows gaps or doubles.
+const SEAM: f32 = 0.06;
+
+/// Share of a cave painting's height that overlaps the row above it. NOTE:
+/// the same number as CAVE_SEAM in tools/slice_sheets.py, which fades each
+/// painting in from the top over exactly this much.
+const CAVE_SEAM: f32 = 0.2;
+
+/// Which of `count` variants the `i`th copy shows. Each run of `count` copies
+/// uses every variant once, in an order that changes from run to run, and
+/// always opens on variant 0, so no variant ever sits next to itself.
+fn variant(i: i64, count: i64) -> i64 {
+    let k = i.rem_euclid(count);
+    if k == 0 {
+        return 0;
+    }
+    let turn = world::hash(0, i.div_euclid(count) as i32, 0, 12) % (count as u64 - 1);
+    1 + (k - 1 + turn as i64) % (count - 1)
+}
+
 /// How dark the deep is (0 = daylight) at a depth in tiles.
 fn darkness(depth: f32) -> f32 {
     let deep = ((depth - 10.0) / 350.0).clamp(0.0, 1.0).powf(0.8) * 0.96;
-    // NOTE: a hard edge at the shaft mouth: daylight stops the moment she's
-    // below the surface, so the shop above reads as the one lit room.
-    if depth < 0.6 { 0.0 } else { deep.max(0.3) }
+    // Daylight reaches four tiles down, then the dark closes in over the next
+    // six. NOTE: it has to arrive gradually. Switched on at the shaft mouth,
+    // the whole screen snapped dark the moment she dipped below the grass.
+    let k = ((depth - 4.0) / 6.0).clamp(0.0, 1.0);
+    deep.max(0.3 * k * k * (3.0 - 2.0 * k))
 }
 
 /// How far the pod can see, in tiles.
@@ -787,6 +823,17 @@ impl Renderer {
                 );
             }
             Event::CantTeleport(why) => self.toast(*why),
+            Event::SelfDestructArmed => self.toast(
+                "Press K again to self-destruct: lose your cargo, restart at the surface shop",
+            ),
+            Event::SelfDestructed { lost } => {
+                self.flash = 1.0;
+                if *lost > 0 {
+                    self.toast(format!("Self-destructed! {lost} items lost."));
+                } else {
+                    self.toast("Self-destructed!");
+                }
+            }
             Event::Pinged => {}
             Event::CantBuild(why) => self.toast(*why),
             Event::RelicDropped { x, y } => {
@@ -881,11 +928,14 @@ impl Renderer {
 
         clear_background(Color::new(0.02, 0.02, 0.04, 1.0));
         self.draw_sky(art, sw);
+        self.draw_cave_layers(art, sw, sh);
         self.draw_surface_trees(game, art, sw);
         self.draw_tiles(game, art, sw, sh);
         self.draw_shop(art);
+        self.draw_turf(art, sw);
         self.draw_sites(game, art, sh);
         self.draw_stashes(game, art);
+        self.draw_ruins(game, art, sw, sh);
         self.draw_crates(game, art, sw, sh);
         self.draw_critters(game, art);
         self.draw_bombs(game);
@@ -952,12 +1002,11 @@ impl Renderer {
 
         self.draw_clouds(art, sw, ground, 0.04, 5.0, 0.9, 7, 11);
         // Far to near: each layer moves a little more with the camera than the
-        // last. Painted mountains when the art is there, drawn ridges otherwise.
-        // NOTE: the ranges stand just under the lowest dip of the green ridge
-        // (RIDGE * 0.23): any lower and the hill hides their foothills, any
-        // higher and sky shows under their flat bases.
-        let base = ground - RIDGE * 0.23 + 4.0;
-        if !self.draw_strip(art, "mountains_far", sw, base, 200.0, 0.08) {
+        // last. Painted ranges when the art is there, drawn ridges otherwise.
+        // NOTE: each range stands lower than the one behind it and hides that
+        // one's flat base; raise a near layer's base and sky shows under the
+        // range behind.
+        if !self.draw_strip(art, "mountains_far", sw, ground - 100.0, 230.0, 0.06) {
             self.draw_ridge(
                 art,
                 sw,
@@ -970,7 +1019,7 @@ impl Renderer {
             );
         }
         self.draw_clouds(art, sw, ground, 0.12, 11.0, 0.6, 5, 12);
-        if !self.draw_strip(art, "mountains_near", sw, base, 150.0, 0.22) {
+        if !self.draw_strip(art, "mountains_mid", sw, ground - 36.0, 200.0, 0.14) {
             self.draw_ridge(
                 art,
                 sw,
@@ -982,16 +1031,19 @@ impl Renderer {
                 false,
             );
         }
-        self.draw_ridge(
-            art,
-            sw,
-            ground,
-            0.45,
-            RIDGE,
-            Color::new(0.43, 0.66, 0.38, 1.0),
-            3,
-            true,
-        );
+        // The painted hills come with their own woods and run down to the grass.
+        if !self.draw_strip(art, "mountains_near", sw, ground + 2.0, 130.0, 0.3) {
+            self.draw_ridge(
+                art,
+                sw,
+                ground,
+                0.45,
+                RIDGE,
+                Color::new(0.43, 0.66, 0.38, 1.0),
+                3,
+                true,
+            );
+        }
         self.draw_birds(ground);
     }
 
@@ -1221,10 +1273,7 @@ impl Renderer {
                 let base = BAND_COLORS[band];
                 let variant = world::hash(seed, tx, ty, 5) % 3;
                 let sprite = match tile {
-                    Tile::Air => {
-                        art.rect(p.x, p.y, TILE, TILE, mix(base, BLACK, 0.72));
-                        continue;
-                    }
+                    Tile::Air => continue,
                     Tile::Wall => {
                         art.rect(p.x, p.y, TILE, TILE, Color::new(0.09, 0.08, 0.11, 1.0));
                         art.rect(
@@ -1236,15 +1285,12 @@ impl Renderer {
                         );
                         continue;
                     }
-                    Tile::Dirt if ty == 0 => format!("grass_{variant}"),
                     Tile::Dirt => format!("dirt_{band}_{variant}"),
                     Tile::Boulder => "boulder".to_string(),
                     Tile::Ore(t) => format!("ore_{t}"),
                     Tile::Mineral(_) => format!("dirt_{band}_{variant}"),
                 };
-                if ty > 0 || tile != Tile::Dirt {
-                    art.rect(p.x, p.y, TILE, TILE, base);
-                }
+                art.rect(p.x, p.y, TILE, TILE, base);
                 match art.get(&sprite) {
                     Some(sprite) => {
                         // Slight overlap hides the ragged painted edges between tiles.
@@ -1263,6 +1309,224 @@ impl Renderer {
         // their own pass rather than breaking the tile batch at every mineral.
         for (p, m, h) in minerals {
             draw_mineral(p, m, h);
+        }
+    }
+
+    /// The painted cave behind everything underground: a back wall for each
+    /// depth band and, where the art has one, a front layer with windows cut
+    /// through it. NOTE: both go across the whole screen and the solid tiles
+    /// are drawn over them, so open space is just where no tile was drawn.
+    /// Each layer trails the camera by a different amount, and that lag is
+    /// what makes the cave look deep.
+    fn draw_cave_layers(&self, art: &Art, sw: f32, sh: f32) {
+        let ground = self.screen(0.0, 0.0).y;
+        let starts = world::BAND_STARTS;
+        for (band, &start) in starts.iter().enumerate() {
+            let top = (ground + start as f32 * TILE).max(0.0);
+            let bottom = starts
+                .get(band + 1)
+                .map_or(sh, |&next| (ground + next as f32 * TILE).min(sh));
+            if top >= bottom {
+                continue;
+            }
+            match art.get(&format!("cave_bg_{band}")) {
+                Some(s) => {
+                    let dim = Color::new(0.5, 0.5, 0.55, 1.0);
+                    self.draw_cave_layer(s, sw, top, bottom, 0.7, dim);
+                }
+                None => {
+                    let flat = mix(BAND_COLORS[band], BLACK, 0.72);
+                    art.rect(0.0, top, sw, bottom - top, flat);
+                }
+            }
+            if let Some(s) = art.get(&format!("cave_fg_{band}")) {
+                let dim = Color::new(0.72, 0.72, 0.76, 1.0);
+                self.draw_cave_layer(s, sw, top, bottom, 0.9, dim);
+            }
+        }
+        self.draw_topsoil(art, sw, ground);
+    }
+
+    /// The first rows under the grass: lit soil that darkens into the root
+    /// wall, and loose roots hanging in front of it. NOTE: both hang from the
+    /// ground line instead of trailing the camera up and down like the cave
+    /// layers. The soil is painted light at the top and dark at the bottom,
+    /// and that only reads right directly under the turf.
+    fn draw_topsoil(&self, art: &Art, sw: f32, ground: f32) {
+        let soil = Shuffled {
+            name: "topsoil_bg",
+            count: 4,
+            lift: 0.0,
+            pace: 0.7,
+            tint: Color::new(0.85, 0.85, 0.85, 1.0),
+        };
+        let roots = Shuffled {
+            name: "topsoil_fg",
+            count: 4,
+            lift: 0.0,
+            pace: 0.9,
+            tint: Color::new(0.7, 0.7, 0.7, 1.0),
+        };
+        self.draw_shuffled(art, &soil, sw, ground);
+        self.draw_shuffled(art, &roots, sw, ground);
+        // The shadow of the sod: dark right under the grass, gone a tile and
+        // a bit lower, so the bright grass and the lit soil don't butt up
+        // against each other.
+        const SHADE: f32 = 1.25 * TILE;
+        const STRIP: f32 = 3.0;
+        let mut d = 0.0;
+        while d < SHADE {
+            let k = 1.0 - d / SHADE;
+            let shade = Color::new(0.05, 0.03, 0.02, 0.6 * k * k);
+            art.rect(0.0, ground + d, sw, STRIP, shade);
+            d += STRIP;
+        }
+    }
+
+    /// One cave painting repeated over screen rows `top` to `bottom`, moving
+    /// at `pace` times the camera's speed.
+    fn draw_cave_layer(&self, s: Sprite, sw: f32, top: f32, bottom: f32, pace: f32, tint: Color) {
+        const HEIGHT: f32 = 6.0 * TILE;
+        // NOTE: rows overlap. Each painting fades in along its top edge and
+        // lies over the foot of the row above, so the light top of one row
+        // never butts against the dark foot of the last. Rows go on top to
+        // bottom, starting with the first one that reaches into the band.
+        const PITCH: f32 = HEIGHT * (1.0 - CAVE_SEAM);
+        let width = HEIGHT * s.size().x / s.size().y;
+        let scroll = self.view * pace;
+        let mut row = ((top + scroll.y - HEIGHT) / PITCH).floor() as i64 + 1;
+        loop {
+            let y = row as f32 * PITCH - scroll.y;
+            if y >= bottom {
+                break;
+            }
+            // Only the part of this copy inside the band is drawn, so two
+            // bands' paintings meet on a clean line.
+            let (y0, y1) = (y.max(top), (y + HEIGHT).min(bottom));
+            let src = Rect::new(
+                s.src.x,
+                s.src.y + (y0 - y) / HEIGHT * s.src.h,
+                s.src.w,
+                (y1 - y0) / HEIGHT * s.src.h,
+            );
+            let piece = Sprite { tex: s.tex, src };
+            // Every other row starts partway along, so stacked copies don't
+            // line up into columns.
+            let x_scroll = scroll.x + row.rem_euclid(2) as f32 * width * 0.37;
+            // NOTE: the paintings aren't made to repeat, so every other copy
+            // is mirrored, the same trick the mountain ranges use.
+            let mut i = (x_scroll / width).floor() as i64;
+            let mut x = i as f32 * width - x_scroll;
+            while x < sw {
+                piece.draw_ex(x, y0, width + 1.0, y1 - y0, tint, i.rem_euclid(2) == 1, 0.0);
+                x += width;
+                i += 1;
+            }
+            row += 1;
+        }
+    }
+
+    /// The grass and sod along the top of the surface row, dug out or not, so
+    /// the meadow carries on across a pit instead of stopping dead at its
+    /// edge. NOTE: this goes on after the tiles and the shop. Drawn with the
+    /// tiles, their overlap bites notches out of it, and under the shop the
+    /// island painted into the shop's sprite would break the line.
+    fn draw_turf(&self, art: &Art, sw: f32) {
+        let turf = Shuffled {
+            name: "turf_lip",
+            count: 3,
+            // Where the slicer puts the ground line in every variant.
+            lift: 155.0 / 365.0,
+            pace: 1.0,
+            tint: WHITE,
+        };
+        self.draw_shuffled(art, &turf, sw, self.screen(0.0, 0.0).y);
+    }
+
+    /// Painted strips laid end to end along the surface, a different variant
+    /// each time. NOTE: they go on left to right, each over the end of the
+    /// one before. A variant is painted fading in along its left edge, so two
+    /// different paintings cross-fade there instead of meeting on a line.
+    fn draw_shuffled(&self, art: &Art, set: &Shuffled, sw: f32, ground: f32) {
+        const WIDTH: f32 = 20.0 * TILE;
+        let pitch = WIDTH * (1.0 - SEAM);
+        let scroll = self.view.x * set.pace;
+        // One early: a strip is wider than the pitch, so the copy before the
+        // first one on screen still reaches into view.
+        let mut i = (scroll / pitch).floor() as i64 - 1;
+        loop {
+            let x = i as f32 * pitch - scroll;
+            if x >= sw {
+                break;
+            }
+            let v = variant(i, set.count);
+            if let Some(s) = art.get(&format!("{}_{v}", set.name)) {
+                let h = WIDTH * s.size().y / s.size().x;
+                s.draw(x, ground - h * set.lift, WIDTH, h, set.tint);
+            }
+            i += 1;
+        }
+    }
+
+    /// Buried ruins, each standing on the floor of its chamber.
+    fn draw_ruins(&self, game: &Game, art: &Art, sw: f32, sh: f32) {
+        let count = (0..64)
+            .take_while(|i| art.get(&format!("ruin_{i}")).is_some())
+            .count();
+        if count == 0 {
+            return;
+        }
+        let mid = (self.view + vec2(sw, sh) / 2.0) / TILE;
+        let reach = sw.max(sh) / TILE / 2.0 + 1.0;
+        let (cols, rows) = world::RUIN_SIZE;
+        for (x, y, _) in game.ruins_near(mid.x, mid.y, reach) {
+            let pick = world::hash(game.world.seed, x, y, 64) as usize % count;
+            let Some(s) = art.get(&format!("ruin_{pick}")) else {
+                continue;
+            };
+            let (fit_w, fit_h) = ((cols as f32 - 0.3) * TILE, (rows as f32 - 0.2) * TILE);
+            let k = (fit_w / s.size().x).min(fit_h / s.size().y);
+            let (w, h) = (s.size().x * k, s.size().y * k);
+            let floor = self.screen(x as f32 + cols as f32 / 2.0, (y + rows) as f32);
+            s.draw(floor.x - w / 2.0, floor.y - h, w, h, WHITE);
+        }
+    }
+
+    /// The relic waiting in each unlooted ruin, glowing over the dark so the
+    /// chamber is worth digging toward.
+    fn draw_ruin_relics(&self, game: &Game, art: &Art, sw: f32, sh: f32) {
+        let mid = (self.view + vec2(sw, sh) / 2.0) / TILE;
+        let reach = sw.max(sh) / TILE / 2.0 + 1.0;
+        for (x, y, waiting) in game.ruins_near(mid.x, mid.y, reach) {
+            if !waiting {
+                continue;
+            }
+            let (rx, ry) = Game::ruin_relic_at(x, y);
+            let bob = (self.t * 2.5 + x as f32).sin() * 3.0;
+            let p = self.screen(rx, ry) + vec2(0.0, bob);
+            let r = TILE * (0.9 + 0.15 * (self.t * 3.0).sin());
+            draw_texture_ex(
+                &self.glow,
+                p.x - r,
+                p.y - r,
+                Color::new(1.0, 0.85, 0.35, 0.7),
+                DrawTextureParams {
+                    dest_size: Some(vec2(2.0 * r, 2.0 * r)),
+                    ..Default::default()
+                },
+            );
+            let idol = world::hash(game.world.seed, x, y, 65) % 4;
+            let Some(s) = art
+                .get(&format!("relic_idol_{idol}"))
+                .or_else(|| art.get("relic_coin"))
+            else {
+                draw_poly(p.x, p.y, 6, TILE * 0.3, self.t * 60.0, GOLD);
+                continue;
+            };
+            let size = TILE * 0.75;
+            let k = (size / s.size().x).min(size / s.size().y);
+            let (w, h) = (s.size().x * k, s.size().y * k);
+            s.draw(p.x - w / 2.0, p.y - h / 2.0, w, h, WHITE);
         }
     }
 
@@ -1472,13 +1736,16 @@ impl Renderer {
         } else {
             Vec2::ZERO
         };
-        let frame = if pod.dig.is_some() {
-            (self.t * 14.0) as i32 % 2
+        let name = if pod.dig.is_some() {
+            format!("pod_drill_{}", (self.t * 14.0) as i32 % 2)
+        } else if pod.thrusting {
+            format!("pod_thrust_{}", (self.t * 12.0) as i32 % 3)
+        } else if pod.vx.abs() > 0.5 {
+            format!("pod_{}", (self.t * 8.0) as i32 % 2)
         } else {
-            0
+            "pod_0".to_string()
         };
-        let w = TILE * 1.2;
-        let Some(tex) = art.get(&format!("pod_{frame}")) else {
+        let Some(tex) = art.get(&name).or_else(|| art.get("pod_0")) else {
             draw_rectangle(
                 p.x - TILE * 0.4,
                 p.y - TILE * 0.4,
@@ -1488,23 +1755,36 @@ impl Renderer {
             );
             return;
         };
-        let h = w * tex.size().y / tex.size().x;
+        // NOTE: every pod frame is one canvas with the hull in its top-right
+        // corner and room for flames behind and below (POD_CANVAS and POD_HULL
+        // in tools/slice_sheets.py). Sizing by the hull, not the canvas, keeps
+        // the pod the same size whether or not it's trailing fire.
+        const CANVAS: Vec2 = vec2(326.0, 220.0);
+        const HULL: Vec2 = vec2(286.0, 200.0);
+        let hull = vec2(TILE * 1.2, TILE * 1.2 * HULL.y / HULL.x);
+        let size = hull * CANVAS / HULL;
         let rotation = if digging_down {
             FRAC_PI_2 * pod.facing
         } else {
             0.0
         };
-        // Sit the sprite on the hitbox floor when level; center it when drilling down.
-        let y = if digging_down {
-            p.y - h / 2.0
+        // Sit the hull on the hitbox floor when level; center it when drilling down.
+        let hull_center = if digging_down {
+            p
         } else {
-            p.y + POD_HALF * TILE - h
+            vec2(p.x, p.y + POD_HALF * TILE - hull.y / 2.0)
         };
+        // The sprite turns about the canvas's middle, which is not the hull's.
+        let off = vec2(
+            (size.x - hull.x) / 2.0 * pod.facing,
+            -(size.y - hull.y) / 2.0,
+        );
+        let center = hull_center - Vec2::from_angle(rotation).rotate(off) + jitter;
         tex.draw_ex(
-            p.x - w / 2.0 + jitter.x,
-            y + jitter.y,
-            w,
-            h,
+            center.x - size.x / 2.0,
+            center.y - size.y / 2.0,
+            size.x,
+            size.y,
             WHITE,
             pod.facing < 0.0,
             rotation,
@@ -1669,6 +1949,7 @@ impl Renderer {
         self.draw_beams(game);
         self.draw_loose(game, art);
         self.draw_relic_drops(game, art);
+        self.draw_ruin_relics(game, art, sw, sh);
         self.draw_health_bars(game);
 
         // The fuse spark blinks faster as it burns down.
@@ -2467,5 +2748,34 @@ fn draw_shop_panel(game: &Game, sw: f32) {
             24.0,
             if b.enabled { GOLD } else { fg },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two copies of the same painting side by side read as a repeat, which
+    /// is the whole thing the variants are there to hide, and a variant left
+    /// out of a run is art that never shows.
+    #[test]
+    fn neighbouring_strips_never_show_the_same_variant() {
+        for count in [3, 4] {
+            for i in -60..60 {
+                assert_ne!(
+                    variant(i, count),
+                    variant(i + 1, count),
+                    "copies {i} and {} of {count} match",
+                    i + 1
+                );
+            }
+            for run in -5..5 {
+                let mut seen: Vec<i64> = (0..count)
+                    .map(|k| variant(run * count + k, count))
+                    .collect();
+                seen.sort();
+                assert_eq!(seen, (0..count).collect::<Vec<_>>(), "run {run} of {count}");
+            }
+        }
     }
 }

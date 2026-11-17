@@ -180,6 +180,8 @@ impl Audio {
                 Event::TeleportArmed => self.play("low_fuel", 0.5),
                 Event::Teleported { .. } => self.play("respawn", 1.0),
                 Event::CantTeleport(_) => self.play("deny", 0.6),
+                Event::SelfDestructArmed => self.play("low_fuel", 0.5),
+                Event::SelfDestructed { .. } => self.play("death", 1.0),
                 Event::Pinged => self.play("ping", 0.8),
                 Event::CantBuild(_) => self.play("deny", 0.6),
                 Event::IonFired { .. } => self.play("ion", 1.0),

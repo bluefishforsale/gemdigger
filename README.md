@@ -45,13 +45,14 @@ Losing the pod isn't the end: you start again at your nearest base, or the surfa
 | Q | Radar ping: shows nearby ore |
 | P | Build a base here |
 | T twice | Sacrifice your cargo to teleport to the nearest shop |
+| K twice | Self-destruct: lose your cargo and start again at the surface shop |
 | ESC | Settings |
 
 ## Features
 
 - An endless mine that goes down forever, with rarer gems the deeper you dig
 - Five depth zones, from sunny topsoil to a dark abyss, each with its own music
-- Daylight stops at the mouth of the shaft, and the light shrinks as you descend
+- Daylight fades out a few meters into the shaft, and the light shrinks as you descend
 - Six kinds of monsters with health bars, from void spiders to the Shadow Leviathan and the Deep One
 - A laser, rockets and a charge-up ion cannon, bought at the shop
 - Rare relics dropped by monsters, permanent bonuses past the max upgrade
@@ -59,6 +60,7 @@ Losing the pod isn't the end: you start again at your nearest base, or the surfa
 - Build your own bases: a full shop, and where you restart after a fall
 - A radar mini-map with a sonar ping for ore, and an arrow to the nearest shop
 - Teleport home by sacrificing your cargo
+- Self-destruct to get out of any hole, at the cost of whatever you were carrying
 - Lost cargo waits where you fell, with an arrow pointing back to it
 - Nothing is ever destroyed: gems that don't fit in a full hold stay glinting where you dug them
 - The fuel bar turns red and flashes faster as you near the point of no return
@@ -68,6 +70,8 @@ Losing the pod isn't the end: you start again at your nearest base, or the surfa
 - A painted sky with mountains, drifting clouds, trees and birds
 - Rare critter dens sealed in the rock: dig one open and they come out biting, and a shot critter drops meat to sell
 - Supply crates hidden in the rock, usually a bomb, once in a long while a gun or a full tank
+- Buried ruins from a dozen lost civilizations, each with a relic waiting inside
+- Painted cave walls behind every tunnel, a different one for each depth band
 - Saves automatically, so you always pick up where you left off
 - An Esc menu with settings for music, sound effects, screen shake and full screen, plus New game to start over on a freshly rolled map
 

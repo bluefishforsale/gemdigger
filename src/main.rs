@@ -260,6 +260,7 @@ fn read_input() -> Input {
         ion: is_key_down(KeyCode::H),
         base: is_key_pressed(KeyCode::P),
         teleport: is_key_pressed(KeyCode::T),
+        self_destruct: is_key_pressed(KeyCode::K),
         ping: is_key_pressed(KeyCode::Q),
     }
 }
@@ -366,6 +367,7 @@ async fn run(save_path: Option<PathBuf>, settings_path: Option<PathBuf>, mut set
                 Event::Sold { .. }
                     | Event::Bought(_)
                     | Event::Died { .. }
+                    | Event::SelfDestructed { .. }
                     | Event::StashRecovered { .. }
             )
         });
