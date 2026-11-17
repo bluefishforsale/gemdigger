@@ -97,19 +97,17 @@ def from_parallax(path: Path) -> np.ndarray:
     return unblend_white(rgb, a)
 
 
-# Rows of the soil wall on topsoil.jpg, the one strip there with no paper in it.
-TOPSOIL_WALL = (30, 332)
-
-
-def from_topsoil(path: Path) -> np.ndarray:
+def from_soft_white(path: Path) -> np.ndarray:
     # NOTE: thin roots and grass blades in soft watercolour. A flood fill from
     # the border leaves the paper trapped between roots as white patches and a
     # pale rim on every root, so coverage is read off the distance from white.
     rgb = np.array(Image.open(path).convert("RGB")).astype(np.float32)
     a = np.clip((247 - rgb.min(axis=2)) / 70, 0, 1)
-    # Pale pebbles in the wall are paint, not paper.
-    a[slice(*TOPSOIL_WALL)] = 1
     return unblend_white(rgb, a)
+
+
+def opaque(path: Path) -> np.ndarray:
+    return np.array(Image.open(path).convert("RGBA"))
 
 
 def unblend_white(rgb: np.ndarray, a: np.ndarray) -> np.ndarray:
@@ -133,7 +131,6 @@ LOADERS = {
     # The white windows cut through these cave layers are the holes the layer
     # behind shows through.
     "cave_parallax.jpg": from_white_jpeg,
-    "topsoil.jpg": from_topsoil,
 }
 
 # NOTE: light-grey smoke and dust come out as faint black puffs under the
@@ -428,18 +425,96 @@ STRIPS = {
         "cave_fg_3": (34, 553, 1166, 704),
         "cave_fg_4": (34, 726, 1166, 875),
     },
-    # What sits right under the grass: lit soil darkening into the root wall,
-    # loose roots to hang in front of it, and the sod along the lip of a pit.
-    "topsoil.jpg": {
-        "topsoil_bg": (30, 30, 1234, 332),
-        "topsoil_fg": (30, 371, 1234, 590),
-        "turf_lip": (30, 650, 1234, 820),
-    },
 }
-# Share of a strip's height, from the bottom, over which it fades to nothing.
+
+# What sits right under the grass, one painting per file and several variants
+# of each, which the game shuffles along the surface: lit soil darkening into
+# the root wall, loose roots to hang in front of it, and the grass and sod.
+#
+# Every variant of a set comes out the same size, whatever was cut from it, so
+# the game can lay them at one pitch.
+# set -> (loader, output size, sides that fade, [(file, crop box), ...])
+TOPSOIL = {
+    # Cut inside the blurred, featureless ends each wall was painted with.
+    "topsoil_bg": (
+        opaque,
+        (1000, 300),
+        "left",
+        [
+            ("topsoil_wall_1.jpg", (196, 0, 1862, 512)),
+            ("topsoil_wall_2.jpg", (196, 0, 1866, 512)),
+            ("topsoil_wall_3.jpg", (328, 0, 1702, 512)),
+            ("topsoil_wall_4.jpg", (193, 0, 1861, 512)),
+        ],
+    ),
+    # NOTE: three of these stop on a ruled line at each side, roots sliced
+    # mid-air, so both ends fade.
+    "topsoil_fg": (
+        from_soft_white,
+        (1000, 230),
+        "both",
+        [
+            ("topsoil_roots_1.jpg", (0, 0, 2064, 445)),
+            ("topsoil_roots_2.jpg", (156, 0, 1912, 445)),
+            ("topsoil_roots_3.jpg", (114, 0, 1949, 445)),
+            ("topsoil_roots_4.jpg", (82, 0, 1983, 445)),
+        ],
+    ),
+    # NOTE: the grass sits at a different height in each painting. Every box
+    # is 155 rows above its ground line and 210 below (running off the image
+    # where it has to), so the ground is at the same place in all of them:
+    # the game's GROUND is 155 / 365.
+    "turf_lip": (
+        from_soft_white,
+        (1400, 175),
+        "left",
+        [
+            ("turf_lip_1.jpg", (0, 128 - 155, 2928, 128 + 210)),
+            ("turf_lip_2.jpg", (0, 216 - 155, 2928, 216 + 210)),
+            ("turf_lip_3.jpg", (0, 226 - 155, 2928, 226 + 210)),
+        ],
+    ),
+}
+# Share of a variant's width over which a fading side goes from clear to
+# solid. NOTE: the game overlaps neighbours by exactly this much (SEAM in
+# render.rs), so two different paintings cross-fade instead of meeting on a
+# line. Change one without the other and the surface shows gaps or doubles.
+SEAM = 0.06
+# Share of the soil wall's height, from the bottom, over which it fades out.
 # NOTE: the soil ends dark but not as dark as the root wall under it; cut
 # square, the join shows as a line across every pit.
-FADE_OUT = {"topsoil_bg": 0.35}
+SOIL_FADE_OUT = 0.35
+
+
+def topsoil_variant(rgba: np.ndarray, box: tuple, size: tuple, sides: str) -> Image.Image:
+    l, t, r, b = box
+    canvas = Image.new("RGBA", (r - l, b - t))
+    canvas.paste(Image.fromarray(rgba), (-l, -t))
+    # NOTE: resize premultiplied, or the transparent black around roots and
+    # blades bleeds into them as a dark fringe.
+    out = np.array(canvas.convert("RGBa").resize(size, Image.Resampling.LANCZOS).convert("RGBA"))
+    alpha = out[..., 3].astype(np.float32)
+    ramp = np.linspace(0, 1, round(size[0] * SEAM))
+    alpha[:, : len(ramp)] *= ramp
+    if sides == "both":
+        alpha[:, -len(ramp) :] *= ramp[::-1]
+    out[..., 3] = alpha.round()
+    return Image.fromarray(out)
+
+
+def cut_topsoil(only: list[str]) -> None:
+    for name, (load, size, sides, variants) in TOPSOIL.items():
+        for n, (sheet, box) in enumerate(variants):
+            if only and sheet not in only:
+                continue
+            img = topsoil_variant(load(ART / sheet), box, size, sides)
+            if name == "topsoil_bg":
+                px = np.array(img)
+                rows = round(px.shape[0] * SOIL_FADE_OUT)
+                fade = np.linspace(1, 0, rows)[:, None]
+                px[-rows:, :, 3] = (px[-rows:, :, 3] * fade).round()
+                img = Image.fromarray(px)
+            img.save(OUT / f"{name}_{n}.png")
 
 SHEETS["pod.jpg"] = {
     "pod_0": (15, 3, 312, 212),
@@ -554,7 +629,7 @@ def max_side(name: str) -> int:
     # shrinking them made the sky a 5x-stretched blur. Keep them at full size.
     # NOTE: 2040, not 2048: the atlas is 2048 wide and pads each sprite, and
     # one that doesn't fit is silently left out of the game.
-    if name.startswith(("mountains_", "cave_bg_", "cave_fg_", "topsoil_", "turf_lip")):
+    if name.startswith(("mountains_", "cave_bg_", "cave_fg_")):
         return 2040
     if name.startswith(("ruin_", "pod_")):
         return 256
@@ -677,12 +752,7 @@ def main(only: list[str]) -> None:
         load = LOADERS.get(sheet, lambda path: np.array(Image.open(path).convert("RGBA")))
         rgba = load(ART / sheet)
         for name, (l, t, r, b) in strips.items():
-            strip = rgba[t:b, l:r].copy()
-            if name in FADE_OUT:
-                rows = round(strip.shape[0] * FADE_OUT[name])
-                ramp = np.linspace(1, 0, rows)[:, None]
-                strip[-rows:, :, 3] = (strip[-rows:, :, 3] * ramp).round()
-            cuts[name] = Image.fromarray(strip)
+            cuts[name] = Image.fromarray(rgba[t:b, l:r])
     groups: dict[str, list[str]] = {}
     for name in cuts:
         groups.setdefault(animation(name) or name, []).append(name)
@@ -696,6 +766,7 @@ def main(only: list[str]) -> None:
             if name.startswith("mountains_"):
                 frame = enlarge(frame)
             shrink(frame, max_side(name)).save(OUT / f"{name}.png")
+    cut_topsoil(only)
 
 
 if __name__ == "__main__":

@@ -283,6 +283,35 @@ fn draw_tree(x: f32, base: f32, s: f32, kind: u64, shade: f32) {
     }
 }
 
+/// A set of painted strips that tile along the surface.
+struct Shuffled {
+    /// Sprites are `<name>_0` up to `<name>_<count - 1>`.
+    name: &'static str,
+    count: i64,
+    /// Share of a strip's height that stands above the ground line.
+    lift: f32,
+    /// How fast it moves sideways, as a share of the camera's speed.
+    pace: f32,
+    tint: Color,
+}
+
+/// Share of a strip's width that overlaps the one before it. NOTE: the same
+/// number as SEAM in tools/slice_sheets.py, which fades each strip in over
+/// exactly this much. Change one alone and the surface shows gaps or doubles.
+const SEAM: f32 = 0.06;
+
+/// Which of `count` variants the `i`th copy shows. Each run of `count` copies
+/// uses every variant once, in an order that changes from run to run, and
+/// always opens on variant 0, so no variant ever sits next to itself.
+fn variant(i: i64, count: i64) -> i64 {
+    let k = i.rem_euclid(count);
+    if k == 0 {
+        return 0;
+    }
+    let turn = world::hash(0, i.div_euclid(count) as i32, 0, 12) % (count as u64 - 1);
+    1 + (k - 1 + turn as i64) % (count - 1)
+}
+
 /// How dark the deep is (0 = daylight) at a depth in tiles.
 fn darkness(depth: f32) -> f32 {
     let deep = ((depth - 10.0) / 350.0).clamp(0.0, 1.0).powf(0.8) * 0.96;
@@ -898,7 +927,7 @@ impl Renderer {
         self.draw_surface_trees(game, art, sw);
         self.draw_tiles(game, art, sw, sh);
         self.draw_shop(art);
-        self.draw_turf(game, art, sw);
+        self.draw_turf(art, sw);
         self.draw_sites(game, art, sh);
         self.draw_stashes(game, art);
         self.draw_ruins(game, art, sw, sh);
@@ -1319,38 +1348,22 @@ impl Renderer {
     /// layers. The soil is painted light at the top and dark at the bottom,
     /// and that only reads right directly under the turf.
     fn draw_topsoil(&self, art: &Art, sw: f32, ground: f32) {
-        const WIDTH: f32 = 24.0 * TILE;
-        let layers = [
-            ("topsoil_bg", 0.7, Color::new(0.85, 0.85, 0.85, 1.0)),
-            ("topsoil_fg", 0.9, Color::new(0.7, 0.7, 0.7, 1.0)),
-        ];
-        for (name, pace, tint) in layers {
-            let Some(s) = art.get(name) else {
-                continue;
-            };
-            let height = WIDTH * s.size().y / s.size().x;
-            if ground + height <= 0.0 {
-                continue;
-            }
-            let scroll = self.view.x * pace;
-            // Every other copy is mirrored, as in the cave layers, so the
-            // painting's two ends never have to match.
-            let mut i = (scroll / WIDTH).floor() as i64;
-            let mut x = i as f32 * WIDTH - scroll;
-            while x < sw {
-                s.draw_ex(
-                    x,
-                    ground,
-                    WIDTH + 1.0,
-                    height,
-                    tint,
-                    i.rem_euclid(2) == 1,
-                    0.0,
-                );
-                x += WIDTH;
-                i += 1;
-            }
-        }
+        let soil = Shuffled {
+            name: "topsoil_bg",
+            count: 4,
+            lift: 0.0,
+            pace: 0.7,
+            tint: Color::new(0.85, 0.85, 0.85, 1.0),
+        };
+        let roots = Shuffled {
+            name: "topsoil_fg",
+            count: 4,
+            lift: 0.0,
+            pace: 0.9,
+            tint: Color::new(0.7, 0.7, 0.7, 1.0),
+        };
+        self.draw_shuffled(art, &soil, sw, ground);
+        self.draw_shuffled(art, &roots, sw, ground);
         // The shadow of the sod: dark right under the grass, gone a tile and
         // a bit lower, so the bright grass and the lit soil don't butt up
         // against each other.
@@ -1405,34 +1418,43 @@ impl Renderer {
 
     /// The grass and sod along the top of the surface row, dug out or not, so
     /// the meadow carries on across a pit instead of stopping dead at its
-    /// edge. Each tile shows its own slice of one long painting, so
-    /// neighbours join up. NOTE: this goes on after the tiles and the shop.
-    /// Drawn with its own tile, the next tile's overlap bites a notch out of
-    /// it, and under the shop the island painted into the shop's sprite would
-    /// break the line.
-    fn draw_turf(&self, game: &Game, art: &Art, sw: f32) {
-        /// Tiles one copy of the painting runs across.
-        const SPAN: i32 = 10;
-        /// How far down the painting the ground line is; blades stand above it.
-        const GROUND: f32 = 0.32;
-        let Some(lip) = art.get("turf_lip") else {
-            return;
+    /// edge. NOTE: this goes on after the tiles and the shop. Drawn with the
+    /// tiles, their overlap bites notches out of it, and under the shop the
+    /// island painted into the shop's sprite would break the line.
+    fn draw_turf(&self, art: &Art, sw: f32) {
+        let turf = Shuffled {
+            name: "turf_lip",
+            count: 3,
+            // Where the slicer puts the ground line in every variant.
+            lift: 155.0 / 365.0,
+            pace: 1.0,
+            tint: WHITE,
         };
-        let w = lip.src.w / SPAN as f32;
-        let h = TILE * SPAN as f32 * lip.src.h / lip.src.w;
-        let x0 = (self.view.x / TILE).floor() as i32;
-        let x1 = ((self.view.x + sw) / TILE).ceil() as i32;
-        for tx in x0..=x1 {
-            if game.world.get(tx, 0) == Tile::Wall {
-                continue;
+        self.draw_shuffled(art, &turf, sw, self.screen(0.0, 0.0).y);
+    }
+
+    /// Painted strips laid end to end along the surface, a different variant
+    /// each time. NOTE: they go on left to right, each over the end of the
+    /// one before. A variant is painted fading in along its left edge, so two
+    /// different paintings cross-fade there instead of meeting on a line.
+    fn draw_shuffled(&self, art: &Art, set: &Shuffled, sw: f32, ground: f32) {
+        const WIDTH: f32 = 20.0 * TILE;
+        let pitch = WIDTH * (1.0 - SEAM);
+        let scroll = self.view.x * set.pace;
+        // One early: a strip is wider than the pitch, so the copy before the
+        // first one on screen still reaches into view.
+        let mut i = (scroll / pitch).floor() as i64 - 1;
+        loop {
+            let x = i as f32 * pitch - scroll;
+            if x >= sw {
+                break;
             }
-            // Every other copy is mirrored, so the painting's ends never meet.
-            let k = tx.rem_euclid(2 * SPAN);
-            let flip = k >= SPAN;
-            let slice = if flip { 2 * SPAN - 1 - k } else { k };
-            let src = Rect::new(lip.src.x + slice as f32 * w, lip.src.y, w, lip.src.h);
-            let p = self.screen(tx as f32, 0.0);
-            Sprite { tex: lip.tex, src }.draw_ex(p.x, p.y - h * GROUND, TILE, h, WHITE, flip, 0.0);
+            let v = variant(i, set.count);
+            if let Some(s) = art.get(&format!("{}_{v}", set.name)) {
+                let h = WIDTH * s.size().y / s.size().x;
+                s.draw(x, ground - h * set.lift, WIDTH, h, set.tint);
+            }
+            i += 1;
         }
     }
 
@@ -2716,5 +2738,34 @@ fn draw_shop_panel(game: &Game, sw: f32) {
             24.0,
             if b.enabled { GOLD } else { fg },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two copies of the same painting side by side read as a repeat, which
+    /// is the whole thing the variants are there to hide, and a variant left
+    /// out of a run is art that never shows.
+    #[test]
+    fn neighbouring_strips_never_show_the_same_variant() {
+        for count in [3, 4] {
+            for i in -60..60 {
+                assert_ne!(
+                    variant(i, count),
+                    variant(i + 1, count),
+                    "copies {i} and {} of {count} match",
+                    i + 1
+                );
+            }
+            for run in -5..5 {
+                let mut seen: Vec<i64> = (0..count)
+                    .map(|k| variant(run * count + k, count))
+                    .collect();
+                seen.sort();
+                assert_eq!(seen, (0..count).collect::<Vec<_>>(), "run {run} of {count}");
+            }
+        }
     }
 }
