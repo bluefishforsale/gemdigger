@@ -42,12 +42,15 @@ impl Mineral {
         }
     }
 
-    /// Shallowest row it appears in; deeper means rarer and harder to reach.
+    /// Shallowest row it appears in. NOTE: all three sit inside the first
+    /// tank's reach. Sulfur used to start at 90 m and potassium at 180 m, and
+    /// a pod that can get that deep and back has stopped needing its first
+    /// bomb, so nobody ever built one.
     pub fn depth(self) -> i32 {
         match self {
-            Mineral::Coal => 10,
-            Mineral::Sulfur => 90,
-            Mineral::Potassium => 180,
+            Mineral::Coal => 3,
+            Mineral::Sulfur => 10,
+            Mineral::Potassium => 20,
         }
     }
 }
@@ -300,9 +303,9 @@ fn generate(seed: u64, x: i32, y: i32) -> Tile {
 fn mineral(seed: u64, x: i32, y: i32) -> Option<Mineral> {
     let m = unit(hash(seed, x, y, 4));
     let kind = match m {
-        m if m < 0.008 => Mineral::Potassium,
-        m if m < 0.022 => Mineral::Sulfur,
-        m if m < 0.06 => Mineral::Coal,
+        m if m < 0.025 => Mineral::Potassium,
+        m if m < 0.05 => Mineral::Sulfur,
+        m if m < 0.09 => Mineral::Coal,
         _ => return None,
     };
     (y >= kind.depth()).then_some(kind)
@@ -433,7 +436,28 @@ mod tests {
         }
     }
 
-    /// Bomb ingredients stay below their depth, so bombs stay hard to get.
+    /// A first bomb has to be within a starter pod's reach: digging a shaft
+    /// three wide down to 60 m should turn up every ingredient, in most
+    /// worlds, well before the first tank upgrade.
+    #[test]
+    fn a_starter_shaft_finds_every_bomb_ingredient() {
+        let mut complete = 0;
+        for seed in 0..40 {
+            let w = World::new(seed);
+            let mut seen = [false; 3];
+            for y in 0..60 {
+                for x in 100..103 {
+                    if let Tile::Mineral(m) = w.get(x, y) {
+                        seen[m as usize] = true;
+                    }
+                }
+            }
+            complete += (seen == [true; 3]) as u32;
+        }
+        assert!(complete >= 30, "only {complete} of 40 worlds had all three");
+    }
+
+    /// No ingredient turns up above its own depth.
     #[test]
     fn minerals_respect_their_depth() {
         let w = World::new(21);

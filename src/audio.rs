@@ -185,7 +185,6 @@ impl Audio {
                 Event::Pinged => self.play("ping", 0.8),
                 Event::CantBuild(_) => self.play("deny", 0.6),
                 Event::IonFired { .. } => self.play("ion", 1.0),
-                Event::CantCraft => self.play("deny", 0.6),
                 Event::BombPlaced { .. } => self.play("fuse", 0.8),
                 Event::Exploded { .. } => self.play("boom", 1.0),
                 Event::MonsterKilled { size, .. } => self.play(&growl_name(*size), 0.6),

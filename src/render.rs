@@ -736,7 +736,7 @@ impl Renderer {
                 self.burst(*x, *y, 40, Color::new(0.8, 0.5, 1.0, 1.0), 6.0, 0.0, true);
             }
             Event::Crafted => {
-                self.toast("Bomb crafted! Press B underground to drop one.");
+                self.toast("Coal + Sulfur + Potassium: bomb made! Press B underground.");
                 self.burst(
                     game.pod.x,
                     game.pod.y - 0.5,
@@ -746,13 +746,6 @@ impl Renderer {
                     0.0,
                     true,
                 );
-            }
-            Event::CantCraft => {
-                if game.bombs >= BOMB_POUCH {
-                    self.toast("Bomb pouch is full");
-                } else {
-                    self.toast("A bomb needs 1 Coal, 1 Sulfur and 1 Potassium");
-                }
             }
             Event::BombPlaced { .. } => self.toast("Fuse lit! Get clear!"),
             Event::Exploded { x, y } => {
@@ -2606,13 +2599,6 @@ pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
         "Sell spare minerals".into(),
         format!("+{}", money(minerals)),
         minerals > 0,
-    );
-    push(
-        0,
-        ShopAction::Craft,
-        format!("Craft bomb  ({}/{BOMB_POUCH})", game.bombs),
-        "C+S+P".into(),
-        game.can_craft(),
     );
     let fuel = game.refuel_cost();
     push(

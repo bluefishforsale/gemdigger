@@ -507,7 +507,6 @@ impl Pod {
 pub enum ShopAction {
     Sell,
     SellMinerals,
-    Craft,
     Refuel,
     Repair,
     Buy(Upgrade),
@@ -575,8 +574,6 @@ pub enum Event {
         count: usize,
     },
     Crafted,
-    /// Craft pressed without the ingredients or with a full pouch.
-    CantCraft,
     BombPlaced {
         x: f32,
         y: f32,
@@ -935,11 +932,27 @@ impl Game {
     }
 
     /// One of each mineral in the hold, and room in the pouch.
-    pub fn can_craft(&self) -> bool {
+    fn can_craft(&self) -> bool {
         self.bombs < BOMB_POUCH
             && Mineral::ALL
                 .iter()
                 .all(|&m| self.count(Item::Mineral(m)) > 0)
+    }
+
+    /// Turns each full set of minerals in the hold into a bomb, there and
+    /// then, while the pouch has room. NOTE: it used to take a trip to the
+    /// shop and a button, and with all three minerals rarely in one hold at
+    /// once that never happened.
+    fn craft_bombs(&mut self) {
+        while self.can_craft() {
+            for m in Mineral::ALL {
+                if let Some(i) = self.cargo.iter().position(|&c| c == Item::Mineral(m)) {
+                    self.cargo.remove(i);
+                }
+            }
+            self.bombs += 1;
+            self.events.push(Event::Crafted);
+        }
     }
 
     pub fn refuel_cost(&self) -> u64 {
@@ -985,6 +998,7 @@ impl Game {
         self.update_critters(dt);
         self.recover_stashes();
         self.pick_up_loose();
+        self.craft_bombs();
         if !self.left_behind.is_empty() {
             let items = std::mem::take(&mut self.left_behind);
             self.events.push(Event::LeftBehind(items));
@@ -1015,19 +1029,6 @@ impl Game {
                     self.cargo.retain(|i| !matches!(i, Item::Mineral(_)));
                     self.events.push(Event::Sold { amount });
                 }
-            }
-            ShopAction::Craft => {
-                if !self.can_craft() {
-                    self.events.push(Event::CantCraft);
-                    return;
-                }
-                for m in Mineral::ALL {
-                    if let Some(i) = self.cargo.iter().position(|&c| c == Item::Mineral(m)) {
-                        self.cargo.remove(i);
-                    }
-                }
-                self.bombs += 1;
-                self.events.push(Event::Crafted);
             }
             ShopAction::Refuel => {
                 let need = self.levels.fuel_max() - self.pod.fuel;
@@ -2568,13 +2569,16 @@ mod tests {
         g.update(DT, Input::default());
     }
 
-    /// Crafting turns exactly one Coal, Sulfur and Potassium into one bomb.
+    /// One Coal, Sulfur and Potassium in the hold become a bomb on the spot,
+    /// wherever she is. When it took a trip to the shop and a button, nobody
+    /// ever made one.
     #[test]
-    fn crafting_uses_one_of_each_mineral() {
-        let mut g = Game::new(1);
+    fn a_full_set_of_minerals_becomes_a_bomb_on_the_spot() {
+        let mut g = game_at_depth(80);
         g.cargo = minerals();
         g.cargo.push(Item::Mineral(Mineral::Coal));
-        g.apply(ShopAction::Craft);
+        let events = g.update(DT, Input::default());
+        assert!(events.contains(&Event::Crafted), "no bomb in {events:?}");
         assert_eq!(g.bombs, 1);
         assert_eq!(
             g.cargo,
@@ -2583,16 +2587,17 @@ mod tests {
         );
     }
 
-    /// Missing an ingredient, or a full pouch, crafts nothing and costs nothing.
+    /// Missing an ingredient, or a full pouch, crafts nothing and the
+    /// minerals wait in the hold.
     #[test]
-    fn crafting_is_refused_without_ingredients_or_room() {
-        let mut g = Game::new(1);
+    fn minerals_wait_without_a_full_set_or_room_in_the_pouch() {
+        let mut g = game_at_depth(80);
         g.cargo = vec![Item::Mineral(Mineral::Coal), Item::Mineral(Mineral::Sulfur)];
-        g.apply(ShopAction::Craft);
+        g.update(DT, Input::default());
         assert_eq!((g.bombs, g.cargo.len()), (0, 2));
         g.cargo = minerals();
         g.bombs = BOMB_POUCH;
-        g.apply(ShopAction::Craft);
+        g.update(DT, Input::default());
         assert_eq!(
             (g.bombs, g.cargo.len()),
             (BOMB_POUCH, 3),
@@ -2674,7 +2679,8 @@ mod tests {
     #[test]
     fn stash_keeps_bombs_and_minerals() {
         let mut g = game_at_depth(80);
-        g.cargo = minerals();
+        // Not a full set, which would turn into a third bomb on recovery.
+        g.cargo = vec![Item::Mineral(Mineral::Coal), Item::Mineral(Mineral::Sulfur)];
         g.bombs = 2;
         let at = (g.pod.x, g.pod.y);
         g.die("test".into());
@@ -2685,7 +2691,7 @@ mod tests {
         g.update(DT, Input::default());
         assert_eq!(
             (g.bombs, g.cargo.len()),
-            (2, 3),
+            (2, 2),
             "stash not fully recovered"
         );
         assert!(g.stashes.is_empty());
