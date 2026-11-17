@@ -1613,7 +1613,7 @@ impl Game {
     /// stuck forever, so after a moment the pod is quietly brought to the
     /// shop with a quarter tank. No message: the game just carries on.
     fn tow_if_stranded(&mut self, dt: f32) {
-        let stranded = self.pod.y <= 1.0
+        let stranded = self.pod.y <= 0.0
             && self.pod.fuel <= 0.0
             && self.money == 0
             && self.cargo_value() + self.mineral_value() == 0;
@@ -1658,7 +1658,10 @@ impl Game {
 
     fn check_fuel(&mut self, dt: f32) {
         self.tow_if_stranded(dt);
-        let underground = self.pod.y > 1.0;
+        // NOTE: on the grass the pod's centre sits above row 0, and anywhere
+        // lower it is in a hole it can't leave without fuel. Draw the line a
+        // row further down and a pit one tile deep is a trap.
+        let underground = self.pod.y > 0.0;
         if self.pod.fuel <= 0.0 && underground {
             self.die("Ran out of fuel".into());
             return;
@@ -2420,6 +2423,26 @@ mod tests {
         let events = g.update(DT, Input::default());
         assert!(events.iter().any(|e| matches!(e, Event::Died { .. })));
         assert_eq!(g.pod.fuel, g.levels.fuel_max());
+    }
+
+    /// A pit one tile deep is underground too. With no fuel she can neither
+    /// fly out nor dig, and with money in hand nobody tows her, so she sat
+    /// there for good.
+    #[test]
+    fn out_of_fuel_in_a_one_tile_pit_respawns() {
+        let mut g = Game::new(1);
+        let tx = SHOP_COLUMNS.0 as i32 - 40;
+        g.world.set(tx, 0, Tile::Air);
+        g.pod.x = tx as f32 + 0.5;
+        g.pod.y = 1.0 - POD_HALF - 0.001;
+        g.pod.fuel = 0.0;
+        g.money = 70;
+        let events = run(&mut g, 3.0, Input::default());
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Died { .. })),
+            "still stuck at {:?}",
+            (g.pod.x, g.pod.y)
+        );
     }
 
     #[test]
