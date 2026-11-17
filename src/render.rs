@@ -787,6 +787,17 @@ impl Renderer {
                 );
             }
             Event::CantTeleport(why) => self.toast(*why),
+            Event::SelfDestructArmed => self.toast(
+                "Press K again to self-destruct: lose your cargo, restart at the surface shop",
+            ),
+            Event::SelfDestructed { lost } => {
+                self.flash = 1.0;
+                if *lost > 0 {
+                    self.toast(format!("Self-destructed! {lost} items lost."));
+                } else {
+                    self.toast("Self-destructed!");
+                }
+            }
             Event::Pinged => {}
             Event::CantBuild(why) => self.toast(*why),
             Event::RelicDropped { x, y } => {
@@ -1337,6 +1348,18 @@ impl Renderer {
                 x += WIDTH;
                 i += 1;
             }
+        }
+        // The shadow of the sod: dark right under the grass, gone a tile and
+        // a bit lower, so the bright grass and the lit soil don't butt up
+        // against each other.
+        const SHADE: f32 = 1.25 * TILE;
+        const STRIP: f32 = 3.0;
+        let mut d = 0.0;
+        while d < SHADE {
+            let k = 1.0 - d / SHADE;
+            let shade = Color::new(0.05, 0.03, 0.02, 0.6 * k * k);
+            art.rect(0.0, ground + d, sw, STRIP, shade);
+            d += STRIP;
         }
     }
 

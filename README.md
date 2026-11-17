@@ -45,6 +45,7 @@ Losing the pod isn't the end: you start again at your nearest base, or the surfa
 | Q | Radar ping: shows nearby ore |
 | P | Build a base here |
 | T twice | Sacrifice your cargo to teleport to the nearest shop |
+| K twice | Self-destruct: lose your cargo and start again at the surface shop |
 | ESC | Settings |
 
 ## Features
@@ -59,6 +60,7 @@ Losing the pod isn't the end: you start again at your nearest base, or the surfa
 - Build your own bases: a full shop, and where you restart after a fall
 - A radar mini-map with a sonar ping for ore, and an arrow to the nearest shop
 - Teleport home by sacrificing your cargo
+- Self-destruct to get out of any hole, at the cost of whatever you were carrying
 - Lost cargo waits where you fell, with an arrow pointing back to it
 - Nothing is ever destroyed: gems that don't fit in a full hold stay glinting where you dug them
 - The fuel bar turns red and flashes faster as you near the point of no return

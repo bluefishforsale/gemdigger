@@ -127,6 +127,8 @@ pub struct Input {
     pub base: bool,
     /// Pressed this frame: teleport (needs a second press to confirm).
     pub teleport: bool,
+    /// Pressed this frame: self-destruct (needs a second press to confirm).
+    pub self_destruct: bool,
     /// Pressed this frame: sonar ping.
     pub ping: bool,
 }
@@ -611,6 +613,10 @@ pub enum Event {
         sacrificed: usize,
     },
     CantTeleport(&'static str),
+    SelfDestructArmed,
+    SelfDestructed {
+        lost: usize,
+    },
     Pinged,
     /// P pressed somewhere a base can't go; says why.
     CantBuild(&'static str),
@@ -679,6 +685,8 @@ pub struct Game {
     pub base_kits: u8,
     /// Seconds left to press T a second time.
     teleport_armed: f32,
+    /// Seconds left to press K a second time.
+    destruct_armed: f32,
     /// Seconds the radar keeps showing ore from the last ping.
     pub ping: f32,
     /// Seconds until she can ping again.
@@ -729,6 +737,7 @@ impl Game {
             bases: Vec::new(),
             base_kits: 0,
             teleport_armed: 0.0,
+            destruct_armed: 0.0,
             ping: 0.0,
             ping_cooldown: 0.0,
             laser: None,
@@ -851,6 +860,23 @@ impl Game {
         self.events.push(Event::Teleported { sacrificed });
     }
 
+    /// K twice: blow the pod up and start again at the surface shop. NOTE:
+    /// this is the one way out that asks for nothing, no fuel, no cargo, no
+    /// money, so no hole the player digs can be a dead end. The price is the
+    /// hold: it goes up with the pod instead of waiting as a stash.
+    fn self_destruct(&mut self) {
+        if self.destruct_armed <= 0.0 {
+            self.destruct_armed = 2.0;
+            self.events.push(Event::SelfDestructArmed);
+            return;
+        }
+        self.destruct_armed = 0.0;
+        let lost = self.cargo.len();
+        self.cargo.clear();
+        self.events.push(Event::SelfDestructed { lost });
+        self.respawn(None);
+    }
+
     fn deploy_base(&mut self) {
         if self.base_kits == 0 {
             return;
@@ -946,6 +972,10 @@ impl Game {
         }
         if input.teleport {
             self.teleport();
+        }
+        self.destruct_armed = (self.destruct_armed - dt).max(0.0);
+        if input.self_destruct {
+            self.self_destruct();
         }
         self.update_bombs(dt);
         self.update_guns(dt, input);
@@ -1579,15 +1609,25 @@ impl Game {
             cause,
             dropped,
         });
-        self.pod = Pod::fresh(&self.levels);
         // Back at the base nearest to where she fell, if she's built any.
-        if let Some(b) = self.bases.iter().min_by(|a, b| {
-            (a.x - x)
-                .hypot(a.floor as f32 - y)
-                .total_cmp(&(b.x - x).hypot(b.floor as f32 - y))
-        }) {
-            self.pod.x = b.x;
-            self.pod.y = b.floor as f32 - POD_HALF - EPS;
+        let base = self
+            .bases
+            .iter()
+            .min_by(|a, b| {
+                (a.x - x)
+                    .hypot(a.floor as f32 - y)
+                    .total_cmp(&(b.x - x).hypot(b.floor as f32 - y))
+            })
+            .map(|b| (b.x, b.floor as f32 - POD_HALF - EPS));
+        self.respawn(base);
+    }
+
+    /// A fresh pod at `spot`, or at the surface shop.
+    fn respawn(&mut self, spot: Option<(f32, f32)>) {
+        self.pod = Pod::fresh(&self.levels);
+        if let Some((x, y)) = spot {
+            self.pod.x = x;
+            self.pod.y = y;
         }
         self.pod.invuln = 2.0;
         self.monsters.clear();
@@ -3044,6 +3084,45 @@ mod tests {
             g.current_site(),
             Some(target),
             "didn't land at the nearest shop"
+        );
+    }
+
+    /// Self-destruct is the way out of any hole: two presses, the cargo is
+    /// gone for good, and she starts again at the surface shop with a full
+    /// tank, even with a base nearer and an empty hold.
+    #[test]
+    fn self_destruct_loses_the_cargo_and_restarts_at_the_surface_shop() {
+        let mut g = game_at_depth(300);
+        g.bases.push(Base { x: 6.5, floor: 301 });
+        g.cargo = vec![Item::Gem(0), Item::Gem(1)];
+        g.pod.fuel = 0.5;
+        let tap = Input {
+            self_destruct: true,
+            ..Input::default()
+        };
+        g.update(DT, tap);
+        assert_eq!(g.depth().round(), 301.0, "went off on the first press");
+        assert_eq!(g.cargo.len(), 2, "cargo lost on the first press");
+        let events = g.update(DT, tap);
+        assert!(
+            events.contains(&Event::SelfDestructed { lost: 2 }),
+            "no self-destruct in {events:?}"
+        );
+        assert!(g.cargo.is_empty(), "cargo survived");
+        assert!(g.stashes.is_empty(), "cargo was left as a stash");
+        assert!(
+            (g.pod.x - SPAWN.0).abs() < 0.01 && (g.pod.y - SPAWN.1).abs() < 0.05,
+            "not at the surface shop: {:?}",
+            (g.pod.x, g.pod.y)
+        );
+        assert_eq!(g.pod.fuel, g.levels.fuel_max());
+
+        let mut g = game_at_depth(300);
+        g.update(DT, tap);
+        let events = g.update(DT, tap);
+        assert!(
+            events.contains(&Event::SelfDestructed { lost: 0 }),
+            "an empty hold blocked it: {events:?}"
         );
     }
 
