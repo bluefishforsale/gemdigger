@@ -14,6 +14,7 @@ use std::path::Path;
 use macroquad::prelude::*;
 
 use crate::art::Art;
+use crate::critters::{self, Critter};
 use crate::game::{Event, Game, Gun, Input, Item, SHOP_COLUMNS, ShopAction, SiteKind, Upgrade};
 use crate::menu::{Choice, Menu};
 use crate::monsters::{Kind, Monster, Phase, Size, Weapon};
@@ -23,7 +24,7 @@ use crate::world::Tile;
 
 const DT: f32 = 1.0 / 60.0;
 
-const STEPS: [(&str, f32); 18] = [
+const STEPS: [(&str, f32); 20] = [
     ("buy laser, rockets, ion cannon, base kit and upgrades", 2.0),
     ("drive off the shop", 5.0),
     ("dig down to 70 m", 150.0),
@@ -42,6 +43,8 @@ const STEPS: [(&str, f32); 18] = [
     ("new game from the Esc menu (pick twice)", 1.0),
     ("drive off the fresh shop", 5.0),
     ("dig the fresh mine to 100 m", 120.0),
+    ("laser kills a critter, collect its meat (F)", 10.0),
+    ("open a supply crate", 2.0),
 ];
 
 #[derive(Default)]
@@ -333,6 +336,56 @@ fn drive(step: usize, p: &mut Pilot, g: &mut Game, events: &[Event]) -> (Input, 
             g.pod.x < SHOP_COLUMNS.0 - 3.0,
         ),
         17 => (p.dig_down(g), g.depth() >= 100.0),
+        18 => {
+            if first {
+                g.arsenal.laser = true;
+                g.cargo.clear();
+                g.pod.facing = 1.0;
+                g.pod.fuel = g.levels.fuel_max();
+                g.pod.hull = g.levels.hull_max();
+                clear_row(g, 6);
+                let (x, floor) = (g.pod.x.floor() as i32, (g.pod.y + 0.5).floor());
+                for dx in 1..=6 {
+                    g.world.set(x + dx, floor as i32, Tile::Dirt);
+                }
+                g.critters.push(Critter {
+                    kind: critters::Kind::Mole,
+                    x: g.pod.x + 4.0,
+                    y: floor - critters::HALF,
+                    vy: 0.0,
+                    dir: -1.0,
+                });
+            }
+            if saw(&|e| matches!(e, Event::CritterKilled { .. })) {
+                p.note = "critter shot".into();
+            }
+            let alive = !g.critters.is_empty();
+            (
+                Input {
+                    laser: alive,
+                    right: !alive,
+                    ..Input::default()
+                },
+                g.cargo.contains(&Item::Meat),
+            )
+        }
+        19 => {
+            if first {
+                g.bombs = 0;
+                let (px, py) = (g.pod.x, g.pod.y);
+                let near = |&(x, y): &(i32, i32)| (x as f32 - px).hypot(y as f32 - py);
+                let crates = g.crates_near(px, py, 48.0);
+                if let Some(&(x, y)) = crates.iter().min_by(|a, b| near(a).total_cmp(&near(b))) {
+                    g.pod.x = x as f32 + 0.5;
+                    g.pod.y = y as f32 + 0.5;
+                    p.note = format!("crate at {x}, {y}");
+                }
+            }
+            (
+                Input::default(),
+                saw(&|e| matches!(e, Event::CrateOpened { .. })),
+            )
+        }
         _ => {
             let json = serde_json::to_string(&g.to_save()).unwrap_or_default();
             let ok = serde_json::from_str(&json)
@@ -374,7 +427,7 @@ async fn new_game(
         crate::start_over(Some(&save), game, renderer);
     }
     let reloaded = match crate::save::load(&save)? {
-        crate::save::Loaded::Resumed(d) => Game::from_save(d).world.seed,
+        crate::save::Loaded::Resumed(d) => Game::from_save(*d).world.seed,
         _ => 0,
     };
     let ok = first.is_none()

@@ -8,6 +8,7 @@ mod art;
 mod audio;
 mod bench;
 mod capture;
+mod critters;
 mod game;
 mod log;
 mod menu;
@@ -168,7 +169,7 @@ fn load_game(path: Option<&Path>) -> (Game, Option<String>) {
         );
     };
     match save::load(path) {
-        Ok(save::Loaded::Resumed(data)) => (Game::from_save(data), Some("Welcome back!".into())),
+        Ok(save::Loaded::Resumed(data)) => (Game::from_save(*data), Some("Welcome back!".into())),
         Ok(save::Loaded::Fresh) => (Game::new(new_seed()), None),
         Ok(save::Loaded::Corrupt { backup }) => (
             Game::new(new_seed()),

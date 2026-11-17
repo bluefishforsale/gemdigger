@@ -7,9 +7,10 @@ use macroquad::prelude::*;
 use macroquad::rand::gen_range;
 
 use crate::art::Art;
+use crate::critters;
 use crate::game::{
-    BASE_KIT_PRICE, BOMB_POUCH, Event, FUSE, Game, Gun, Item, MAX_BASE_KITS, MAX_LEVEL, POD_HALF,
-    SHOP_COLUMNS, ShopAction, SiteKind, Upgrade,
+    BASE_KIT_PRICE, BOMB_POUCH, Event, FUSE, Game, Gun, Item, Loot, MAX_BASE_KITS, MAX_LEVEL,
+    POD_HALF, SHOP_COLUMNS, ShopAction, SiteKind, Upgrade,
 };
 use crate::monsters::{Monster, Phase, Size};
 use crate::world::Mineral;
@@ -79,7 +80,6 @@ pub struct Renderer {
     flash: f32,
     birds: Vec<Bird>,
     effects: Vec<Effect>,
-    critters: Vec<Critter>,
     next_flock: f32,
 }
 
@@ -98,18 +98,6 @@ struct Effect {
     /// Plays the frames in order; otherwise holds one frame picked by `variant`.
     animate: bool,
     variant: usize,
-}
-
-/// A harmless little creature wandering an open cave, for life underground.
-struct Critter {
-    prefix: &'static str,
-    x: f32,
-    y: f32,
-    home: f32,
-    dir: f32,
-    phase: f32,
-    /// Fireflies and ghosts drift and glow; the rest walk the floor.
-    floats: bool,
 }
 
 /// A small bird crossing the sky, in screen space above the horizon.
@@ -223,6 +211,7 @@ fn item_color(item: Item) -> Color {
     match item {
         Item::Gem(t) => ORE_COLORS[(t as usize).min(5)],
         Item::Mineral(m) => mineral_color(m),
+        Item::Meat => Color::new(0.85, 0.35, 0.3, 1.0),
     }
 }
 
@@ -294,82 +283,6 @@ fn draw_tree(x: f32, base: f32, s: f32, kind: u64, shade: f32) {
     }
 }
 
-/// A decoration in an open cave tile: purely visual, never in the way.
-#[derive(Clone, Copy)]
-struct Decor {
-    /// Sprite name, or the prefix of numbered variants.
-    name: &'static str,
-    /// Hangs from the ceiling instead of standing on the floor.
-    hanging: bool,
-    /// Gives off light, so it shows through the dark.
-    glows: bool,
-}
-
-/// What decorates the open tile at (tx, ty), decided by the seed alone so it
-/// never moves or flickers between frames. About one in twenty open tiles.
-fn decor_at(game: &Game, tx: i32, ty: i32) -> Option<Decor> {
-    if ty < 3 || game.world.get(tx, ty) != Tile::Air {
-        return None;
-    }
-    let h = world::hash(game.world.seed, tx, ty, 50);
-    if world::unit(h) > 0.05 {
-        return None;
-    }
-    let band = world::band(ty);
-    let pick = |opts: &[Decor]| opts[((h >> 20) as usize) % opts.len()];
-    let d = |name, hanging, glows| Decor {
-        name,
-        hanging,
-        glows,
-    };
-    if game.world.get(tx, ty + 1).is_solid() {
-        let floor: &[Decor] = match band {
-            0 | 1 => &[
-                d("bones", false, false),
-                d("mine_support", false, false),
-                d("crate", false, false),
-                d("lantern", false, true),
-            ],
-            2 => &[
-                d("stalagmite", false, false),
-                d("crystal", false, true),
-                d("bones", false, false),
-                d("pillar", false, false),
-            ],
-            _ => &[
-                d("glow_mushroom", false, true),
-                d("crystal", false, true),
-                d("glow_plant", false, true),
-                d("stalagmite", false, false),
-                d("ruins", false, false),
-            ],
-        };
-        return Some(pick(floor));
-    }
-    if game.world.get(tx, ty - 1).is_solid() {
-        let ceiling: &[Decor] = match band {
-            0 | 1 => &[d("roots", true, false)],
-            _ => &[d("stalactite", true, false), d("roots", true, false)],
-        };
-        return Some(pick(ceiling));
-    }
-    None
-}
-
-/// The sprite for a decor name: the plain name, or one of its numbered variants.
-fn decor_sprite<'a>(art: &'a Art, name: &str, h: u64) -> Option<crate::art::Sprite<'a>> {
-    if let Some(s) = art.get(name) {
-        return Some(s);
-    }
-    let n = (0..8)
-        .take_while(|i| art.get(&format!("{name}_{i}")).is_some())
-        .count();
-    if n == 0 {
-        return None;
-    }
-    art.get(&format!("{name}_{}", (h as usize) % n))
-}
-
 /// How dark the deep is (0 = daylight) at a depth in tiles.
 fn darkness(depth: f32) -> f32 {
     let deep = ((depth - 10.0) / 350.0).clamp(0.0, 1.0).powf(0.8) * 0.96;
@@ -409,7 +322,6 @@ impl Renderer {
             flash: 0.0,
             birds: Vec::new(),
             effects: Vec::new(),
-            critters: Vec::new(),
             next_flock: 4.0,
         }
     }
@@ -446,108 +358,6 @@ impl Renderer {
             animate,
             variant: gen_range(0, 16),
         });
-    }
-
-    /// Keeps a few critters around the open caves on screen, never in the sky.
-    fn update_critters(&mut self, dt: f32, game: &Game) {
-        let (sw, sh) = (screen_width(), screen_height());
-        let (vx0, vy0) = (
-            self.cam.x / TILE - sw / TILE / 2.0,
-            self.cam.y / TILE - sh / TILE / 2.0,
-        );
-        let (vx1, vy1) = (vx0 + sw / TILE, vy0 + sh / TILE);
-        self.critters
-            .retain(|c| c.x > vx0 - 4.0 && c.x < vx1 + 4.0 && c.y > vy0 - 4.0 && c.y < vy1 + 4.0);
-        for c in &mut self.critters {
-            c.phase += dt;
-            if c.floats {
-                c.x = c.home + (c.phase * 0.6).sin() * 1.5;
-                continue;
-            }
-            let nx = c.x + c.dir * 0.6 * dt;
-            let floor_ok = game
-                .world
-                .get(nx.floor() as i32, c.y.floor() as i32 + 1)
-                .is_solid();
-            let open = game.world.get(nx.floor() as i32, c.y.floor() as i32) == Tile::Air;
-            if (nx - c.home).abs() > 2.0 || !floor_ok || !open {
-                c.dir = -c.dir;
-            } else {
-                c.x = nx;
-            }
-        }
-        if self.critters.len() >= 4 || gen_range(0.0, 1.0) > 0.02 {
-            return;
-        }
-        // Try a random open floor tile on screen.
-        let tx = gen_range(vx0 as i32, vx1 as i32 + 1);
-        let ty = gen_range((vy0 as i32).max(3), vy1 as i32 + 1);
-        if ty < 3 || game.world.get(tx, ty) != Tile::Air || !game.world.get(tx, ty + 1).is_solid() {
-            return;
-        }
-        let shallow = [
-            "critter_mole",
-            "critter_beetle",
-            "critter_leaf",
-            "critter_mushroom",
-            "critter_spider",
-        ];
-        let deep = [
-            "critter_firefly",
-            "critter_ghost",
-            "critter_golem",
-            "critter_beetle",
-            "critter_mushroom",
-        ];
-        let pool: &[&'static str] = if world::band(ty) <= 1 {
-            &shallow
-        } else {
-            &deep
-        };
-        let prefix = pool[gen_range(0, pool.len())];
-        let floats = matches!(prefix, "critter_firefly" | "critter_ghost");
-        let x = tx as f32 + 0.5;
-        self.critters.push(Critter {
-            prefix,
-            x,
-            y: ty as f32 + if floats { 0.3 } else { 0.5 },
-            home: x,
-            dir: if gen_range(0.0, 1.0) < 0.5 { -1.0 } else { 1.0 },
-            phase: gen_range(0.0, TAU),
-            floats,
-        });
-    }
-
-    fn draw_critters(&self, art: &Art) {
-        for c in &self.critters {
-            let frame = (c.phase * 3.0) as i32 % 2;
-            let Some(s) = art.get(&format!("{}_{frame}", c.prefix)) else {
-                continue;
-            };
-            let size = TILE * if c.floats { 0.55 } else { 0.7 };
-            let k = (size / s.size().x).min(size / s.size().y);
-            let (w, h) = (s.size().x * k, s.size().y * k);
-            let bob = if c.floats {
-                (c.phase * 2.0).sin() * 4.0
-            } else {
-                0.0
-            };
-            let p = self.screen(c.x, c.y);
-            let bottom = if c.floats {
-                p.y + h / 2.0
-            } else {
-                p.y + TILE * 0.5
-            };
-            s.draw_ex(
-                p.x - w / 2.0,
-                bottom - h + bob,
-                w,
-                h,
-                WHITE,
-                c.dir < 0.0,
-                0.0,
-            );
-        }
     }
 
     fn draw_effects(&self, art: &Art) {
@@ -750,7 +560,6 @@ impl Renderer {
             e.y -= e.rise * dt;
         }
         self.effects.retain(|e| e.t < e.dur);
-        self.update_critters(dt, game);
     }
 
     fn react(&mut self, e: &Event, game: &Game) {
@@ -789,7 +598,7 @@ impl Renderer {
                 };
                 self.burst(*x, *y, 18 + extra, item_color(*item), 5.0, 0.0, true);
                 match item {
-                    Item::Gem(_) => {
+                    Item::Gem(_) | Item::Meat => {
                         self.toast(format!("+1 {}  ({})", item.name(), money(item.value())))
                     }
                     Item::Mineral(_) => self.toast(format!("+1 {}  (for bombs)", item.name())),
@@ -997,6 +806,52 @@ impl Renderer {
                     self.burst(x, *y, 1, Color::new(0.6, 0.9, 1.0, 1.0), 3.0, 0.0, true);
                 }
             }
+            Event::CritterKilled { x, y } => {
+                self.burst(*x, *y, 14, Color::new(0.8, 0.25, 0.2, 1.0), 4.0, 8.0, false);
+            }
+            Event::CrateOpened { x, y, loot } => {
+                self.toast(match loot {
+                    Loot::Bomb => "Crate opened: +1 bomb!".to_string(),
+                    Loot::Gun(g) => format!("Crate opened: {} found!", g.name()),
+                    Loot::Fuel => "Crate opened: fuel tank filled!".to_string(),
+                });
+                self.effect("fx_dust", *x, *y, 0.6, 1.2, 0.6, false);
+                self.burst(*x, *y, 30, GOLD, 5.0, 0.0, true);
+            }
+            Event::CrateKeptShut => self.toast("Bomb pouch is full: this crate stays shut"),
+        }
+    }
+
+    fn draw_critters(&self, game: &Game, art: &Art) {
+        for (i, c) in game.critters.iter().enumerate() {
+            let frame = ((game.time * 3.0) as usize + i) % 2;
+            let Some(s) = art.get(&format!("{}_{frame}", c.kind.sprite())) else {
+                continue;
+            };
+            let size = TILE * 0.7;
+            let k = (size / s.size().x).min(size / s.size().y);
+            let (w, h) = (s.size().x * k, s.size().y * k);
+            let feet = self.screen(c.x, c.y + critters::HALF);
+            s.draw_ex(feet.x - w / 2.0, feet.y - h, w, h, WHITE, c.dir < 0.0, 0.0);
+        }
+    }
+
+    /// Unopened supply crates, each on the floor of its own hollow.
+    fn draw_crates(&self, game: &Game, art: &Art, sw: f32, sh: f32) {
+        let mid = (self.view + vec2(sw, sh) / 2.0) / TILE;
+        let reach = sw.max(sh) / TILE / 2.0 + 1.0;
+        for (tx, ty) in game.crates_near(mid.x, mid.y, reach) {
+            let p = self.screen(tx as f32, ty as f32);
+            let size = TILE * 0.85;
+            let Some(s) = art.get("crate") else {
+                let pad = (TILE - size) / 2.0;
+                let wood = Color::new(0.55, 0.38, 0.2, 1.0);
+                art.rect(p.x + pad, p.y + TILE - size, size, size, wood);
+                continue;
+            };
+            let k = (size / s.size().x).min(size / s.size().y);
+            let (w, h) = (s.size().x * k, s.size().y * k);
+            s.draw(p.x + (TILE - w) / 2.0, p.y + TILE - h, w, h, WHITE);
         }
     }
 
@@ -1031,7 +886,8 @@ impl Renderer {
         self.draw_shop(art);
         self.draw_sites(game, art, sh);
         self.draw_stashes(game, art);
-        self.draw_critters(art);
+        self.draw_crates(game, art, sw, sh);
+        self.draw_critters(game, art);
         self.draw_bombs(game);
         self.draw_rockets(game);
         for m in &game.monsters {
@@ -1407,22 +1263,6 @@ impl Renderer {
         // their own pass rather than breaking the tile batch at every mineral.
         for (p, m, h) in minerals {
             draw_mineral(p, m, h);
-        }
-        // Decor last, so it sits in front of the cave wall behind it.
-        for ty in y0.max(3)..=y1 {
-            for tx in x0..=x1 {
-                let Some(d) = decor_at(game, tx, ty) else {
-                    continue;
-                };
-                let Some(s) = decor_sprite(art, d.name, world::hash(seed, tx, ty, 51)) else {
-                    continue;
-                };
-                let p = self.screen(tx as f32, ty as f32);
-                let k = (TILE * 0.95 / s.size().x).min(TILE * 0.95 / s.size().y);
-                let (w, h) = (s.size().x * k, s.size().y * k);
-                let y = if d.hanging { p.y } else { p.y + TILE - h };
-                s.draw(p.x + (TILE - w) / 2.0, y, w, h, WHITE);
-            }
         }
     }
 
@@ -1826,9 +1666,8 @@ impl Renderer {
             }
         }
 
-        self.draw_decor_glow(game, sw, sh);
         self.draw_beams(game);
-        self.draw_loose(game);
+        self.draw_loose(game, art);
         self.draw_relic_drops(game, art);
         self.draw_health_bars(game);
 
@@ -1866,45 +1705,9 @@ impl Renderer {
         }
     }
 
-    /// Glowing mushrooms, crystals and lanterns light their corner of the dark.
-    fn draw_decor_glow(&self, game: &Game, sw: f32, sh: f32) {
-        let x0 = (self.view.x / TILE).floor() as i32;
-        let y0 = (self.view.y / TILE).floor() as i32;
-        let x1 = ((self.view.x + sw) / TILE).ceil() as i32;
-        let y1 = ((self.view.y + sh) / TILE).ceil() as i32;
-        for ty in y0.max(3)..=y1 {
-            for tx in x0..=x1 {
-                let Some(d) = decor_at(game, tx, ty) else {
-                    continue;
-                };
-                if !d.glows {
-                    continue;
-                }
-                let p = self.screen(tx as f32 + 0.5, ty as f32 + 0.6);
-                let pulse = 0.8 + 0.2 * (self.t * 1.5 + tx as f32).sin();
-                let r = TILE * 1.3 * pulse;
-                let color = match d.name {
-                    "lantern" => Color::new(1.0, 0.75, 0.35, 0.55),
-                    "crystal" => Color::new(0.55, 0.85, 1.0, 0.5),
-                    _ => Color::new(0.5, 0.4, 1.0, 0.5),
-                };
-                draw_texture_ex(
-                    &self.glow,
-                    p.x - r,
-                    p.y - r,
-                    color,
-                    DrawTextureParams {
-                        dest_size: Some(vec2(2.0 * r, 2.0 * r)),
-                        ..Default::default()
-                    },
-                );
-            }
-        }
-    }
-
     /// Relics glow over the dark so a drop is never lost in it.
     /// Things the hold had no room for, glinting where they were dug out.
-    fn draw_loose(&self, game: &Game) {
+    fn draw_loose(&self, game: &Game, art: &Art) {
         for (i, l) in game.loose.iter().enumerate() {
             let p = self.screen(l.x, l.y);
             let pulse = 0.7 + 0.3 * (self.t * 3.0 + i as f32).sin();
@@ -1920,6 +1723,13 @@ impl Renderer {
                     ..Default::default()
                 },
             );
+            if l.item == Item::Meat
+                && let Some(s) = art.get("meat")
+            {
+                let size = TILE * 0.6;
+                s.draw(p.x - size / 2.0, p.y - size / 2.0, size, size, WHITE);
+                continue;
+            }
             draw_poly(p.x, p.y, 6, TILE * 0.18, self.t * 40.0, c);
             draw_poly(
                 p.x,
@@ -2238,6 +2048,22 @@ impl Renderer {
             );
         }
         let p = to_map(game.pod.x, game.pod.y);
+        // An arrow off the pod toward the nearest place to refuel, since the
+        // gold squares pinned to the edge don't say which one is closest.
+        let (sx, sy) = game.nearest_site(game.pod.x, game.pod.y).landing();
+        let to_site = vec2(sx - game.pod.x, sy - game.pod.y);
+        if to_site.length() > 2.0 {
+            let d = to_site.normalize();
+            let side = vec2(-d.y, d.x) * 5.0;
+            let green = Color::new(0.45, 1.0, 0.55, 1.0);
+            draw_line(p.x, p.y, p.x + d.x * 10.0, p.y + d.y * 10.0, 2.0, green);
+            draw_triangle(
+                p + d * 19.0,
+                p + d * 10.0 + side,
+                p + d * 10.0 - side,
+                green,
+            );
+        }
         let blink = 0.6 + 0.4 * (self.t * 6.0).sin();
         draw_circle(p.x, p.y, 3.5, with_alpha(WHITE, blink));
         if pinging {
@@ -2488,7 +2314,7 @@ pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
     push(
         0,
         ShopAction::Sell,
-        "Sell gems".into(),
+        "Sell gems and meat".into(),
         format!("+{}", money(value)),
         value > 0,
     );

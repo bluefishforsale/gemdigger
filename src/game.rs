@@ -1,10 +1,13 @@
 //! The rules, with no drawing or sound, so the whole game runs headless in
 //! tests. Each update returns `Event`s that the renderer and audio react to.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
+use crate::critters::{self, Critter};
 use crate::monsters::{Hit, Kind, Monster, Phase, Size, Weapon};
-use crate::world::{self, Mineral, Tile, WIDTH, World};
+use crate::world::{self, Mineral, Pocket, Tile, WIDTH, World};
 
 /// Half the pod's width and height, in tiles.
 pub const POD_HALF: f32 = 0.4;
@@ -20,6 +23,11 @@ const ORE_VALUES: [u64; 6] = [10, 25, 60, 150, 400, 1000];
 const FUEL_PRICE: f32 = 1.0;
 const REPAIR_PRICE: f32 = 2.0;
 const MINERAL_VALUE: u64 = 5;
+const MEAT_VALUE: u64 = 30;
+/// Chance a crate holds a gun or a full tank instead of a bomb.
+const CRATE_RARE: f32 = 0.01;
+/// How far from the pod an opened den is noticed, in tiles.
+const DEN_REACH: f32 = 16.0;
 /// Bombs carried at once; they ride in their own pouch, not the cargo hold.
 pub const BOMB_POUCH: u8 = 3;
 /// Seconds from dropping a bomb to the blast.
@@ -70,6 +78,8 @@ pub fn ore_value(tier: u8) -> u64 {
 pub enum Item {
     Gem(u8),
     Mineral(Mineral),
+    /// What a shot critter leaves behind.
+    Meat,
 }
 
 impl Item {
@@ -77,6 +87,7 @@ impl Item {
         match self {
             Item::Gem(t) => ORE_NAMES.get(t as usize).copied().unwrap_or("Gem"),
             Item::Mineral(m) => m.name(),
+            Item::Meat => "Meat",
         }
     }
 
@@ -84,6 +95,7 @@ impl Item {
         match self {
             Item::Gem(t) => ore_value(t),
             Item::Mineral(_) => MINERAL_VALUE,
+            Item::Meat => MEAT_VALUE,
         }
     }
 
@@ -333,6 +345,15 @@ pub struct RelicDrop {
     pub y: f32,
     pub vy: f32,
     pub relic: Relic,
+}
+
+/// What a supply crate held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Loot {
+    Bomb,
+    Gun(Gun),
+    /// A full tank.
+    Fuel,
 }
 
 /// Chance a heavy-weapon kill drops a relic, by monster size.
@@ -599,6 +620,17 @@ pub enum Event {
         x1: f32,
         y: f32,
     },
+    CritterKilled {
+        x: f32,
+        y: f32,
+    },
+    CrateOpened {
+        x: f32,
+        y: f32,
+        loot: Loot,
+    },
+    /// Touched a crate of bombs with a full pouch; it stays shut for later.
+    CrateKeptShut,
 }
 
 /// Small xorshift generator so game randomness is seedable in tests.
@@ -661,6 +693,11 @@ pub struct Game {
     laser_cut: Option<(i32, i32, f32)>,
     pub stashes: Vec<Stash>,
     pub monsters: Vec<Monster>,
+    pub critters: Vec<Critter>,
+    /// Cells whose den has emptied or whose crate has been opened.
+    spent: HashSet<(i32, i32)>,
+    /// Whether the crate she's touching has already said it's staying shut.
+    crate_refused: bool,
     pub deaths: u32,
     pub max_depth: f32,
     /// Screen shake strength, roughly 0 to 1.
@@ -700,6 +737,9 @@ impl Game {
             laser_cut: None,
             stashes: Vec::new(),
             monsters: Vec::new(),
+            critters: Vec::new(),
+            spent: HashSet::new(),
+            crate_refused: false,
             deaths: 0,
             max_depth: 0.0,
             shake: 0.0,
@@ -847,11 +887,11 @@ impl Game {
         self.events.push(Event::BaseBuilt { x: p.x, y: p.y });
     }
 
-    /// What the gems in the hold sell for; minerals are kept for crafting.
+    /// What the gems and meat in the hold sell for; minerals are kept for crafting.
     pub fn cargo_value(&self) -> u64 {
         self.cargo
             .iter()
-            .filter(|i| matches!(i, Item::Gem(_)))
+            .filter(|i| !matches!(i, Item::Mineral(_)))
             .map(|i| i.value())
             .sum()
     }
@@ -911,6 +951,8 @@ impl Game {
         self.update_guns(dt, input);
         self.update_drops(dt);
         self.update_monsters(dt);
+        self.update_pockets();
+        self.update_critters(dt);
         self.recover_stashes();
         self.pick_up_loose();
         if !self.left_behind.is_empty() {
@@ -932,7 +974,7 @@ impl Game {
                 let amount = self.cargo_value();
                 if amount > 0 {
                     self.money += amount;
-                    self.cargo.retain(|i| !matches!(i, Item::Gem(_)));
+                    self.cargo.retain(|i| matches!(i, Item::Mineral(_)));
                     self.events.push(Event::Sold { amount });
                 }
             }
@@ -1181,6 +1223,7 @@ impl Game {
             let (w, _) = m.size.dims();
             (m.x - x).hypot(m.y - y) <= 2.2 + w * 0.3
         });
+        self.kill_critters(|c| (c.x - x).hypot(c.y - y) <= 2.2);
 
         if weapon == Weapon::Bomb
             && self.pod.invuln <= 0.0
@@ -1293,6 +1336,7 @@ impl Game {
         self.strike(Weapon::Laser, Weapon::Laser.damage() * dt, |m| {
             Game::in_beam(m, x0, x1, y)
         });
+        self.kill_critters(|c| c.in_beam(x0, x1, y));
         self.laser = Some(Beam { x0, x1, y, t: 0.0 });
     }
 
@@ -1315,6 +1359,7 @@ impl Game {
         let mut booms = Vec::new();
         let world = &self.world;
         let monsters = &self.monsters;
+        let critters = &self.critters;
         self.rockets.retain_mut(|r| {
             r.life -= dt;
             let nx = r.x + r.vx * dt;
@@ -1322,7 +1367,8 @@ impl Game {
             let hits_monster = monsters
                 .iter()
                 .any(|m| m.is_active() && m.touches(nx, r.y, 0.2));
-            if hits_rock || hits_monster || r.life <= 0.0 {
+            let hits_critter = critters.iter().any(|c| c.touches(nx, r.y, 0.2));
+            if hits_rock || hits_monster || hits_critter || r.life <= 0.0 {
                 booms.push((nx, r.y));
                 return false;
             }
@@ -1371,6 +1417,7 @@ impl Game {
         self.strike(Weapon::Ion, Weapon::Ion.damage(), |m| {
             Game::in_beam(m, x0, x1, y)
         });
+        self.kill_critters(|c| c.in_beam(x0, x1, y));
         self.shake = self.shake.max(0.8);
         self.ion_beam = Some(Beam { x0, x1, y, t: 0.35 });
         self.events.push(Event::IonFired { x0, x1, y });
@@ -1762,11 +1809,184 @@ impl Game {
         }
     }
 
+    /// Dens and crates not yet used up, in the cells within `reach` tiles of (x, y).
+    fn pockets_near(&self, x: f32, y: f32, reach: f32) -> Vec<((i32, i32), Pocket)> {
+        let (cx0, cy0) = world::cell_of((x - reach).floor() as i32, (y - reach).floor() as i32);
+        let (cx1, cy1) = world::cell_of((x + reach).floor() as i32, (y + reach).floor() as i32);
+        let mut out = Vec::new();
+        for cy in cy0..=cy1 {
+            for cx in cx0..=cx1 {
+                if self.spent.contains(&(cx, cy)) {
+                    continue;
+                }
+                if let Some(p) = world::pocket(self.world.seed, cx, cy) {
+                    out.push(((cx, cy), p));
+                }
+            }
+        }
+        out
+    }
+
+    /// The tiles of the unopened crates in the cells within `reach` tiles of (x, y).
+    pub fn crates_near(&self, x: f32, y: f32, reach: f32) -> Vec<(i32, i32)> {
+        self.pockets_near(x, y, reach)
+            .into_iter()
+            .filter_map(|(_, p)| match p {
+                Pocket::Crate { x, y } => Some((x, y)),
+                Pocket::Den { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Whether anything has broken through to the den whose top-left is (x, y).
+    fn den_is_open(&self, x: i32, y: i32) -> bool {
+        let (w, h) = world::DEN_SIZE;
+        let sides = (y..y + h).flat_map(|ty| [(x - 1, ty), (x + w, ty)]);
+        let ends = (x..x + w).flat_map(|tx| [(tx, y - 1), (tx, y + h)]);
+        sides
+            .chain(ends)
+            .any(|(tx, ty)| self.world.get(tx, ty) == Tile::Air)
+    }
+
+    /// Puts a den's one to three critters on its floor.
+    fn wake_den(&mut self, x: i32, y: i32) {
+        let h = world::hash(self.world.seed, x, y, 62);
+        let floor = (y + world::DEN_SIZE.1) as f32;
+        for i in 0..1 + (h % 3) as i32 {
+            self.critters.push(Critter {
+                kind: critters::Kind::for_band(world::band(y), h >> (8 + 4 * i)),
+                x: (x + i) as f32 + 0.5,
+                y: floor - critters::HALF,
+                vy: 0.0,
+                dir: if i % 2 == 0 { 1.0 } else { -1.0 },
+            });
+        }
+    }
+
+    /// What the crate at (x, y) holds. NOTE: decided by the seed, not rolled
+    /// on touch, or standing on a crate with a full pouch would reroll it
+    /// every frame until it came up rare.
+    fn crate_loot(&self, x: i32, y: i32) -> Loot {
+        let h = world::hash(self.world.seed, x, y, 61);
+        if world::unit(h) >= CRATE_RARE {
+            return Loot::Bomb;
+        }
+        match Gun::ALL.into_iter().find(|&g| !self.arsenal.has(g)) {
+            Some(g) if h & 1 == 0 => Loot::Gun(g),
+            _ => Loot::Fuel,
+        }
+    }
+
+    /// Wakes any den that's been opened near the pod, and opens the crate
+    /// she's touching.
+    fn update_pockets(&mut self) {
+        let (px, py) = (self.pod.x, self.pod.y);
+        let mut touching = None;
+        for (cell, pocket) in self.pockets_near(px, py, DEN_REACH) {
+            match pocket {
+                Pocket::Den { x, y } => {
+                    if self.den_is_open(x, y) {
+                        self.spent.insert(cell);
+                        self.wake_den(x, y);
+                    }
+                }
+                Pocket::Crate { x, y } => {
+                    if (x as f32 + 0.5 - px).hypot(y as f32 + 0.5 - py) < 0.9 {
+                        touching = Some((cell, x, y));
+                    }
+                }
+            }
+        }
+        let Some((cell, x, y)) = touching else {
+            self.crate_refused = false;
+            return;
+        };
+        let loot = self.crate_loot(x, y);
+        match loot {
+            Loot::Bomb if self.bombs >= BOMB_POUCH => {
+                if !self.crate_refused {
+                    self.events.push(Event::CrateKeptShut);
+                }
+                self.crate_refused = true;
+                return;
+            }
+            Loot::Bomb => self.bombs += 1,
+            Loot::Gun(g) => self.arsenal.give(g),
+            Loot::Fuel => self.pod.fuel = self.levels.fuel_max(),
+        }
+        self.spent.insert(cell);
+        self.events.push(Event::CrateOpened {
+            x: x as f32 + 0.5,
+            y: y as f32 + 0.5,
+            loot,
+        });
+    }
+
+    /// Critters fall, walk until a wall turns them round, head for the pod
+    /// when it's on their level, and bite it on contact.
+    fn update_critters(&mut self, dt: f32) {
+        let (px, py) = (self.pod.x, self.pod.y);
+        let world = &self.world;
+        let mut bitten = false;
+        for c in &mut self.critters {
+            c.vy = (c.vy + GRAVITY * dt).min(MAX_FALL);
+            let ny = c.y + c.vy * dt;
+            let below = (ny + critters::HALF).floor() as i32;
+            if !world.get(c.x.floor() as i32, below).is_solid() {
+                c.y = ny;
+                continue;
+            }
+            c.y = below as f32 - critters::HALF;
+            c.vy = 0.0;
+            let hunting = (py - c.y).abs() < 1.5 && (px - c.x).abs() < 6.0;
+            if hunting {
+                c.dir = if px > c.x { 1.0 } else { -1.0 };
+            }
+            let nx = c.x + c.dir * critters::SPEED * dt;
+            let ahead = (nx + c.dir * critters::HALF).floor() as i32;
+            if !world.get(ahead, c.y.floor() as i32).is_solid() {
+                c.x = nx;
+            } else if !hunting {
+                c.dir = -c.dir;
+            }
+            bitten |= c.touches(px, py, POD_HALF);
+        }
+        if bitten && self.pod.invuln <= 0.0 {
+            self.pod.invuln = 1.0;
+            self.hurt(critters::BITE, "Bitten by a cave critter");
+        }
+    }
+
+    /// Kills every critter `reached` picks; each leaves its meat where it stood.
+    fn kill_critters(&mut self, reached: impl Fn(&Critter) -> bool) {
+        let mut dead = Vec::new();
+        self.critters.retain(|c| {
+            if !reached(c) {
+                return true;
+            }
+            dead.push((c.x, c.y));
+            false
+        });
+        for (x, y) in dead {
+            self.loose.push(Loose {
+                x,
+                y: y.floor() + 0.5,
+                item: Item::Meat,
+            });
+            self.events.push(Event::CritterKilled { x, y });
+        }
+    }
+
     /// Snapshot for saving.
     pub fn to_save(&self) -> SaveData {
         // Mid-dig the pod overlaps rock; save where the dig started instead.
         let (x, y) = self.pod.dig.map_or((self.pod.x, self.pod.y), |d| d.from);
+        // Sorted so the same game always saves the same bytes.
+        let mut spent: Vec<_> = self.spent.iter().copied().collect();
+        spent.sort_unstable();
         SaveData {
+            critters: self.critters.clone(),
+            spent,
             version: SaveData::VERSION,
             seed: self.world.seed,
             money: self.money,
@@ -1804,6 +2024,8 @@ impl Game {
         game.loose = s.loose;
         game.base_kits = s.base_kits.min(MAX_BASE_KITS);
         game.stashes = s.stashes;
+        game.critters = s.critters;
+        game.spent = s.spent.into_iter().collect();
         game.deaths = s.deaths;
         game.max_depth = s.max_depth;
         game.repair_foundation();
@@ -1873,6 +2095,10 @@ pub struct SaveData {
     pub base_kits: u8,
     #[serde(default)]
     pub loose: Vec<Loose>,
+    #[serde(default)]
+    pub critters: Vec<Critter>,
+    #[serde(default)]
+    pub spent: Vec<(i32, i32)>,
     pub stashes: Vec<Stash>,
     pub changes: Vec<(i32, i32, Tile)>,
     pub deaths: u32,
@@ -1914,6 +2140,8 @@ impl From<SaveDataV1> for SaveData {
         SaveData {
             arsenal: Arsenal::default(),
             loose: Vec::new(),
+            critters: Vec::new(),
+            spent: Vec::new(),
             bases: Vec::new(),
             base_kits: 0,
             version: SaveData::VERSION,
@@ -2959,6 +3187,243 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&g.to_save()).unwrap()).unwrap(),
         );
         assert_eq!(back.loose, g.loose);
+    }
+
+    /// The first den (or crate) in the mine that isn't hard against the left wall.
+    fn find_pocket(g: &Game, den: bool) -> (i32, i32) {
+        for cy in 1..200 {
+            for cx in 1..WIDTH / world::CELL {
+                match world::pocket(g.world.seed, cx, cy) {
+                    Some(Pocket::Den { x, y }) if den => return (x, y),
+                    Some(Pocket::Crate { x, y }) if !den => return (x, y),
+                    _ => {}
+                }
+            }
+        }
+        panic!("no pocket in 200 rows of cells");
+    }
+
+    /// Stands the pod in tile (tx, ty), dug out, on solid ground.
+    fn park(g: &mut Game, tx: i32, ty: i32) {
+        g.world.set(tx, ty, Tile::Air);
+        g.world.set(tx, ty + 1, Tile::Dirt);
+        g.pod.x = tx as f32 + 0.5;
+        g.pod.y = ty as f32 + 1.0 - POD_HALF - EPS;
+    }
+
+    fn critter_at(g: &mut Game, x: f32) {
+        let y = g.pod.y + POD_HALF - critters::HALF;
+        g.critters.push(Critter {
+            kind: critters::Kind::Mole,
+            x,
+            y,
+            vy: 0.0,
+            dir: 1.0,
+        });
+    }
+
+    fn laser() -> Input {
+        Input {
+            laser: true,
+            ..Input::default()
+        }
+    }
+
+    /// Critters only come out of a den once it's been dug open, and a den
+    /// empties once: no critters from sealed rock, none a second time.
+    #[test]
+    fn critters_come_out_only_when_their_den_is_opened() {
+        let mut g = Game::new(11);
+        g.monster_timer = f32::INFINITY;
+        g.pod.invuln = f32::INFINITY;
+        let (x, y) = find_pocket(&g, true);
+        let (w, h) = world::DEN_SIZE;
+        for ty in y - 1..=y + h {
+            for tx in x - 1..=x + w {
+                let inside = (x..x + w).contains(&tx) && (y..y + h).contains(&ty);
+                g.world
+                    .set(tx, ty, if inside { Tile::Air } else { Tile::Dirt });
+            }
+        }
+        park(&mut g, x - 3, y + 1);
+        run(&mut g, 1.0, Input::default());
+        assert!(g.critters.is_empty(), "sealed den let out {:?}", g.critters);
+
+        g.world.set(x - 1, y + 1, Tile::Air);
+        run(&mut g, DT, Input::default());
+        assert!(
+            (1..=3).contains(&g.critters.len()),
+            "opened den let out {} critters",
+            g.critters.len()
+        );
+
+        g.critters.clear();
+        run(&mut g, 1.0, Input::default());
+        assert!(g.critters.is_empty(), "an emptied den filled up again");
+    }
+
+    /// Critters bite for a little hull, and driving into one doesn't kill it.
+    #[test]
+    fn critters_bite_and_survive_being_driven_into() {
+        let mut g = game_at_depth(80);
+        critter_at(&mut g, 8.0);
+        let hull = g.pod.hull;
+        let events = run(&mut g, 2.0, Input::default());
+        assert!(
+            events.contains(&Event::Hurt {
+                amount: critters::BITE
+            }),
+            "no bite in {events:?}"
+        );
+        assert!(g.pod.hull < hull, "hull untouched at {}", g.pod.hull);
+        assert_eq!(g.critters.len(), 1, "contact killed the critter");
+    }
+
+    /// A shot critter leaves meat where it stood, and the pod can pick it up.
+    #[test]
+    fn a_lasered_critter_drops_meat_to_collect() {
+        let mut g = game_at_depth(80);
+        g.arsenal.laser = true;
+        g.pod.invuln = f32::INFINITY;
+        critter_at(&mut g, 8.0);
+        let events = run(&mut g, DT, laser());
+        assert!(g.critters.is_empty(), "critter survived the laser");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::CritterKilled { .. })),
+            "kill not announced: {events:?}"
+        );
+        assert_eq!(
+            g.loose.iter().map(|l| l.item).collect::<Vec<_>>(),
+            vec![Item::Meat]
+        );
+        let right = Input {
+            right: true,
+            ..Input::default()
+        };
+        run(&mut g, 1.0, right);
+        assert_eq!(g.cargo, vec![Item::Meat], "meat not picked up");
+    }
+
+    /// Bombs and rockets kill critters too.
+    #[test]
+    fn a_blast_kills_critters() {
+        for weapon in [Weapon::Bomb, Weapon::Rocket] {
+            let mut g = armed(80);
+            critter_at(&mut g, 8.0);
+            let y = g.pod.y;
+            g.explode(8.5, y, weapon);
+            assert!(g.critters.is_empty(), "critter survived a {weapon:?}");
+            assert_eq!(g.loose.len(), 1, "{weapon:?} kill left no meat");
+        }
+    }
+
+    /// Meat sells with the gems for its flat price; minerals stay.
+    #[test]
+    fn meat_sells_with_the_gems() {
+        let mut g = Game::new(1);
+        g.cargo = vec![Item::Meat, Item::Gem(0), Item::Mineral(Mineral::Coal)];
+        g.apply(ShopAction::Sell);
+        assert_eq!(g.money, MEAT_VALUE + ore_value(0));
+        assert_eq!(g.cargo, vec![Item::Mineral(Mineral::Coal)]);
+    }
+
+    /// Touching a crate opens it once, for a bomb.
+    #[test]
+    fn a_crate_gives_a_bomb_once() {
+        let mut g = Game::new(11);
+        g.monster_timer = f32::INFINITY;
+        let (x, y) = find_pocket(&g, false);
+        assert_eq!(g.crate_loot(x, y), Loot::Bomb, "first crate is a rare one");
+        assert!(g.crates_near(x as f32, y as f32, 2.0).contains(&(x, y)));
+        park(&mut g, x, y);
+        let events = run(&mut g, 0.5, Input::default());
+        let opened = events
+            .iter()
+            .filter(|e| matches!(e, Event::CrateOpened { .. }))
+            .count();
+        assert_eq!(opened, 1, "crate opened {opened} times");
+        assert_eq!(g.bombs, 1);
+        assert!(
+            !g.crates_near(x as f32, y as f32, 2.0).contains(&(x, y)),
+            "opened crate still there"
+        );
+    }
+
+    /// With a full pouch a bomb crate stays shut, says so once, and opens
+    /// later when there's room.
+    #[test]
+    fn a_bomb_crate_waits_for_room_in_the_pouch() {
+        let mut g = Game::new(11);
+        g.monster_timer = f32::INFINITY;
+        let (x, y) = find_pocket(&g, false);
+        g.bombs = BOMB_POUCH;
+        park(&mut g, x, y);
+        let events = run(&mut g, 0.5, Input::default());
+        let refusals = events
+            .iter()
+            .filter(|e| **e == Event::CrateKeptShut)
+            .count();
+        assert_eq!(refusals, 1, "refused {refusals} times in {events:?}");
+        assert_eq!(g.bombs, BOMB_POUCH);
+        g.bombs -= 1;
+        run(&mut g, DT, Input::default());
+        assert_eq!(g.bombs, BOMB_POUCH, "crate didn't open once there was room");
+    }
+
+    /// About one crate in a hundred is rare: the next gun she lacks or a full
+    /// tank, and only ever a tank once she owns every gun.
+    #[test]
+    fn rare_crates_hold_a_gun_or_a_full_tank() {
+        let mut g = Game::new(11);
+        let spots = || (0..400).flat_map(|y| (0..250).map(move |x| (x, y)));
+        let rare: Vec<_> = spots()
+            .filter(|&(x, y)| g.crate_loot(x, y) != Loot::Bomb)
+            .collect();
+        assert!(
+            (500..1500).contains(&rare.len()),
+            "{} rare crates in 100000",
+            rare.len()
+        );
+        let guns = rare
+            .iter()
+            .filter(|&&(x, y)| g.crate_loot(x, y) == Loot::Gun(Gun::Laser))
+            .count();
+        assert!(
+            guns > 0 && guns < rare.len(),
+            "{guns} lasers among {} rare crates",
+            rare.len()
+        );
+        g.arsenal = Arsenal {
+            laser: true,
+            rockets: true,
+            ion: true,
+        };
+        assert!(
+            rare.iter().all(|&(x, y)| g.crate_loot(x, y) == Loot::Fuel),
+            "a rare crate offered a gun she already owns"
+        );
+    }
+
+    /// Loose critters and used-up dens and crates survive a save round trip,
+    /// or reloading would refill every crate.
+    #[test]
+    fn saves_keep_critters_and_opened_crates() {
+        let mut g = Game::new(11);
+        g.monster_timer = f32::INFINITY;
+        let (x, y) = find_pocket(&g, false);
+        park(&mut g, x, y);
+        run(&mut g, DT, Input::default());
+        critter_at(&mut g, x as f32 + 0.5);
+        let back = Game::from_save(
+            serde_json::from_str(&serde_json::to_string(&g.to_save()).unwrap()).unwrap(),
+        );
+        assert_eq!(back.critters, g.critters);
+        assert!(
+            !back.crates_near(x as f32, y as f32, 2.0).contains(&(x, y)),
+            "opened crate came back after reload"
+        );
     }
 
     /// Saving mid-dig must not put the pod inside rock on reload.
