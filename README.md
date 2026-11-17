@@ -68,6 +68,8 @@ Losing the pod isn't the end: you start again at your nearest base, or the surfa
 - A painted sky with mountains, drifting clouds, trees and birds
 - Rare critter dens sealed in the rock: dig one open and they come out biting, and a shot critter drops meat to sell
 - Supply crates hidden in the rock, usually a bomb, once in a long while a gun or a full tank
+- Buried ruins from a dozen lost civilizations, each with a relic waiting inside
+- Painted cave walls behind every tunnel, a different one for each depth band
 - Saves automatically, so you always pick up where you left off
 - An Esc menu with settings for music, sound effects, screen shake and full screen, plus New game to start over on a freshly rolled map
 

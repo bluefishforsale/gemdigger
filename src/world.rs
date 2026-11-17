@@ -150,6 +150,11 @@ const POCKET_MIN_DEPTH: i32 = 12;
 const DEN_CHANCE: f32 = 0.3;
 /// Twice the den chance: crates are half as rare as dens.
 const CRATE_CHANCE: f32 = 0.6;
+/// Width and height of a ruin's chamber, in tiles.
+pub const RUIN_SIZE: (i32, i32) = (6, 4);
+/// Ruins are the rarest find, and never near the surface.
+const RUIN_CHANCE: f32 = 0.06;
+const RUIN_MIN_DEPTH: i32 = 30;
 
 /// A small hollow sealed in the rock until something digs into it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,6 +163,8 @@ pub enum Pocket {
     Den { x: i32, y: i32 },
     /// A supply crate in a hollow one tile big.
     Crate { x: i32, y: i32 },
+    /// A buried chamber with a ruin and its relic; (x, y) is its top-left tile.
+    Ruin { x: i32, y: i32 },
 }
 
 impl Pocket {
@@ -166,6 +173,7 @@ impl Pocket {
         match self {
             Pocket::Den { x, y } => (x, y, DEN_SIZE.0, DEN_SIZE.1),
             Pocket::Crate { x, y } => (x, y, 1, 1),
+            Pocket::Ruin { x, y } => (x, y, RUIN_SIZE.0, RUIN_SIZE.1),
         }
     }
 
@@ -186,26 +194,31 @@ fn raw_pocket(seed: u64, cx: i32, cy: i32) -> Option<Pocket> {
     }
     let h = hash(seed, cx, cy, 60);
     let r = unit(h);
-    if r >= DEN_CHANCE + CRATE_CHANCE {
-        return None;
-    }
-    let den = r < DEN_CHANCE;
-    let (w, rows) = if den { DEN_SIZE } else { (1, 1) };
+    // NOTE: one roll, cut into slices. A new kind takes the unused top of the
+    // range so the dens and crates of an existing mine stay where they were.
+    let (w, rows, min_depth) = match r {
+        r if r < DEN_CHANCE => (DEN_SIZE.0, DEN_SIZE.1, POCKET_MIN_DEPTH),
+        r if r < DEN_CHANCE + CRATE_CHANCE => (1, 1, POCKET_MIN_DEPTH),
+        r if r < DEN_CHANCE + CRATE_CHANCE + RUIN_CHANCE => {
+            (RUIN_SIZE.0, RUIN_SIZE.1, RUIN_MIN_DEPTH)
+        }
+        _ => return None,
+    };
     // One tile in from the cell's edge on every side, so pockets never touch
     // each other or the walls of the mine.
     let x = cx * CELL + 1 + ((h >> 8) % (CELL - w - 1) as u64) as i32;
     let y = cy * CELL + 1 + ((h >> 16) % (CELL - rows - 1) as u64) as i32;
-    if y < POCKET_MIN_DEPTH {
+    if y < min_depth {
         return None;
     }
-    Some(if den {
-        Pocket::Den { x, y }
-    } else {
-        Pocket::Crate { x, y }
+    Some(match (w, rows) {
+        DEN_SIZE => Pocket::Den { x, y },
+        RUIN_SIZE => Pocket::Ruin { x, y },
+        _ => Pocket::Crate { x, y },
     })
 }
 
-/// The den or crate in cell (cx, cy), if it has one. NOTE: `generate` lets an
+/// The den, crate or ruin in cell (cx, cy), if it has one. NOTE: `generate` lets an
 /// outpost win any overlap, so a pocket touching one is dropped here; without
 /// that the game would look for a crate inside an outpost's floor.
 pub fn pocket(seed: u64, cx: i32, cy: i32) -> Option<Pocket> {
@@ -492,11 +505,11 @@ mod tests {
         }
     }
 
-    /// Dens stay rare, about one cell in three, and crates turn up about
-    /// twice as often.
+    /// Dens stay rare, about one cell in three, crates turn up about twice as
+    /// often, and ruins are much rarer than either.
     #[test]
     fn dens_are_rare_and_crates_twice_as_common() {
-        let (mut dens, mut crates, mut cells) = (0, 0, 0);
+        let (mut dens, mut crates, mut ruins, mut cells) = (0, 0, 0, 0);
         for seed in 0..10 {
             for cy in 1..60 {
                 for cx in 0..WIDTH / CELL {
@@ -504,6 +517,7 @@ mod tests {
                     match pocket(seed, cx, cy) {
                         Some(Pocket::Den { .. }) => dens += 1,
                         Some(Pocket::Crate { .. }) => crates += 1,
+                        Some(Pocket::Ruin { .. }) => ruins += 1,
                         None => {}
                     }
                 }
@@ -518,6 +532,10 @@ mod tests {
         assert!(
             (1.8..2.2).contains(&ratio),
             "{crates} crates to {dens} dens"
+        );
+        assert!(
+            ruins > 0 && ruins * 3 < dens,
+            "{ruins} ruins to {dens} dens"
         );
     }
 

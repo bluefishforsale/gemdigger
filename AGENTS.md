@@ -37,7 +37,7 @@ A y release changes gameplay, so before tagging:
 
 ## Playtest
 
-`./target/release/gemdigger --playtest <dir>` plays the real game with an autopilot through every feature (shop, digging, ping, laser, rockets, bombs, monster fights, relics, bases, teleport, death and respawn, save round trip, critters and meat, supply crates), with no audio and no real save, printing PASS or FAIL per step and saving a screenshot after each. Starting money, one bomb, some cargo and the test monsters are granted, and shop purchases call `apply` directly. Run it before tagging, and look at the screenshots, not only the PASS lines.
+`./target/release/gemdigger --playtest <dir>` plays the real game with an autopilot through every feature (shop, digging, ping, laser, rockets, bombs, monster fights, relics, bases, teleport, death and respawn, save round trip, critters and meat, supply crates, ruins), with no audio and no real save, printing PASS or FAIL per step and saving a screenshot after each. Starting money, one bomb, some cargo and the test monsters are granted, and shop purchases call `apply` directly. Run it before tagging, and look at the screenshots, not only the PASS lines.
 
 ## Releasing
 

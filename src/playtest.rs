@@ -24,7 +24,7 @@ use crate::world::Tile;
 
 const DT: f32 = 1.0 / 60.0;
 
-const STEPS: [(&str, f32); 20] = [
+const STEPS: [(&str, f32); 21] = [
     ("buy laser, rockets, ion cannon, base kit and upgrades", 2.0),
     ("drive off the shop", 5.0),
     ("dig down to 70 m", 150.0),
@@ -45,6 +45,7 @@ const STEPS: [(&str, f32); 20] = [
     ("dig the fresh mine to 100 m", 120.0),
     ("laser kills a critter, collect its meat (F)", 10.0),
     ("open a supply crate", 2.0),
+    ("claim a ruin's relic", 2.0),
 ];
 
 #[derive(Default)]
@@ -386,6 +387,27 @@ fn drive(step: usize, p: &mut Pilot, g: &mut Game, events: &[Event]) -> (Input, 
                 saw(&|e| matches!(e, Event::CrateOpened { .. })),
             )
         }
+        20 => {
+            if first {
+                let (px, py) = (g.pod.x, g.pod.y);
+                let near = |&(x, y, _): &(i32, i32, bool)| (x as f32 - px).hypot(y as f32 - py);
+                let ruins = g.ruins_near(px, py, 400.0);
+                if let Some(&(x, y, _)) = ruins.iter().min_by(|a, b| near(a).total_cmp(&near(b))) {
+                    let (rx, ry) = Game::ruin_relic_at(x, y);
+                    // One tile to the side, so the first frame shows the relic waiting.
+                    g.pod.x = rx - 1.5;
+                    g.pod.y = ry;
+                    p.note = format!("ruin at {x}, {y}");
+                }
+            }
+            (
+                Input {
+                    right: p.t > 0.5,
+                    ..Input::default()
+                },
+                saw(&|e| matches!(e, Event::RelicFound(_))),
+            )
+        }
         _ => {
             let json = serde_json::to_string(&g.to_save()).unwrap_or_default();
             let ok = serde_json::from_str(&json)
@@ -467,6 +489,10 @@ pub async fn run(dir: &Path) -> anyhow::Result<()> {
             events = game.update(DT, input);
             renderer.update(DT, &game, &events);
             renderer.draw(&game, &art, true);
+            // The pit just under the grass, where sky, turf and cave wall meet.
+            if i == 2 && (pilot.t - 0.9).abs() < DT / 2.0 {
+                get_screen_data().export_png(&dir.join("02a_surface_pit.png").to_string_lossy());
+            }
             if i == 7 && (pilot.t - 1.0).abs() < DT / 2.0 {
                 get_screen_data()
                     .export_png(&dir.join("07b_fight_health_bar.png").to_string_lossy());

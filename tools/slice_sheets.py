@@ -1,12 +1,14 @@
 """Cut the 0.3.0 sprite sheets in art/ into the named sprites the game embeds.
 
+Name sheets to cut only those; with none, every sheet is cut again.
+
 Like slice_atlas.py, the sheets are laid out by an image model, so the boxes
 below were auto-detected by alpha (connected components) and then named by eye
 from a labelled contact sheet. Swap a sheet and its boxes need re-measuring:
 rerun with --boxes to print the detected boxes and render the contact sheets
 to target/sheets/.
 
-    uv run --no-project --with pillow --with numpy --with scipy python tools/slice_sheets.py [--boxes]
+    uv run --no-project --with pillow --with numpy --with scipy python tools/slice_sheets.py [--boxes] [sheet ...]
 """
 
 import sys
@@ -24,7 +26,12 @@ CONTACT = ROOT / "target" / "sheets"
 # Pixels at or above this alpha count as part of a sprite when finding boxes.
 # NOTE: the PNGs' glow fringes bridge neighbours (the fence joins the mine
 # entrance) unless only fully opaque pixels count.
-SOLID = {"surface_props.png": 255, "monsters.png": 255, "effects.jpg": 40}
+SOLID = {
+    "surface_props.png": 255,
+    "monsters.png": 255,
+    "effects.jpg": 40,
+    "ruins_civ_dark.png": 255,
+}
 FONT = ImageFont.load_default(size=16)
 
 
@@ -68,6 +75,28 @@ def from_dark_on_white(path: Path) -> np.ndarray:
     return unblend_white(rgb, a)
 
 
+# Rows of the three mountain ranges on parallax.jpg; the clouds sit below.
+RANGES = [(22, 181), (190, 356), (369, 528)]
+
+
+def from_parallax(path: Path) -> np.ndarray:
+    # NOTE: snow, mist and cloud are as white as the paper here, so a flood
+    # fill from the border eats into the peaks. A range is instead everything
+    # under its skyline, and a cloud everything inside its outline.
+    rgb = np.array(Image.open(path).convert("RGB")).astype(np.float32)
+    paper = rgb.min(axis=2) >= 249
+    fg = ndimage.binary_closing(~paper, iterations=3)
+    fg = ndimage.binary_fill_holes(fg)
+    for top, bottom in RANGES:
+        fg[top:bottom] = np.maximum.accumulate(fg[top:bottom], axis=0)
+    # The outline's outer pixels are half paper; shave them or every range
+    # and cloud wears a white rim.
+    fg = ndimage.binary_erosion(fg, iterations=3)
+    a = np.minimum(ndimage.gaussian_filter(fg.astype(np.float32), 0.8) * 1.6, 1)
+    a[fg] = np.maximum(a[fg], ndimage.binary_erosion(fg)[fg])
+    return unblend_white(rgb, a)
+
+
 def unblend_white(rgb: np.ndarray, a: np.ndarray) -> np.ndarray:
     safe = np.maximum(a, 1e-3)[..., None]
     col = np.clip((rgb - 255 * (1 - a[..., None])) / safe, 0, 255)
@@ -81,6 +110,11 @@ LOADERS = {
     "creatures.jpg": from_white_jpeg,
     "underground.jpg": from_white_jpeg,
     "effects.jpg": from_dark_on_white,
+    "pod.jpg": from_white_jpeg,
+    "ruins_norse.jpg": from_white_jpeg,
+    "ruins_mayan.jpg": from_white_jpeg,
+    "ruins_civ_dark.png": from_png,
+    "parallax.jpg": from_parallax,
 }
 
 # NOTE: light-grey smoke and dust come out as faint black puffs under the
@@ -143,8 +177,10 @@ def contact_sheet(sheet: str, rgba: np.ndarray, boxes: list[tuple]) -> None:
     img.save(CONTACT / f"{Path(sheet).stem}.png")
 
 
-def print_boxes() -> None:
+def print_boxes(only: list[str]) -> None:
     for sheet, load in LOADERS.items():
+        if only and sheet not in only:
+            continue
         rgba = load(ART / sheet)
         _, boxes = detect(rgba, sheet)
         contact_sheet(sheet, rgba, boxes)
@@ -157,8 +193,6 @@ def print_boxes() -> None:
 # so a region can be loose; (left, top, right, bottom) in sheet pixels.
 SHEETS = {
     "surface_props.png": {
-        "mountains_far": (10, 345, 785, 505),
-        "mountains_near": (10, 505, 760, 625),
         "tree_0": (690, 20, 915, 258),
         "tree_1": (915, 28, 1090, 252),
         "tree_2": (1092, 28, 1240, 252),
@@ -187,17 +221,6 @@ SHEETS = {
         "flower_5": (380, 885, 470, 998),
         "flower_6": (700, 875, 785, 952),
         "flower_7": (808, 875, 875, 950),
-        "cloud_0": (738, 492, 1013, 580),
-        "cloud_1": (1018, 510, 1144, 554),
-        "cloud_2": (1148, 506, 1293, 557),
-        "cloud_3": (1294, 499, 1513, 583),
-        "cloud_4": (683, 584, 912, 693),
-        "cloud_5": (906, 573, 1169, 693),
-        "cloud_6": (1133, 568, 1283, 617),
-        "cloud_7": (1170, 609, 1319, 683),
-        "cloud_8": (1327, 604, 1447, 647),
-        "cloud_9": (1436, 594, 1506, 628),
-        "cloud_10": (1289, 673, 1403, 713),
         "cottage": (12, 620, 315, 862),
         "windmill": (320, 630, 452, 864),
         "mine_entrance": (454, 655, 718, 860),
@@ -284,9 +307,6 @@ SHEETS = {
         "fx_sparkle_6": (1059, 516, 1089, 552),
         "fx_sparkle_7": (983, 526, 1008, 554),
         "fx_sparkle_8": (1128, 534, 1153, 563),
-        "fx_dust_0": (30, 652, 185, 810),
-        "fx_dust_1": (198, 638, 341, 811),
-        "fx_dust_2": (346, 635, 506, 816),
         "fx_debris_dirt": (545, 648, 670, 805),
         "fx_debris_stone": (830, 640, 945, 810),
         "fx_explosion_0": (983, 614, 1110, 713),
@@ -353,6 +373,126 @@ SHEETS["creatures.jpg"] = dict(
     )
 )
 
+SHEETS["parallax.jpg"] = {
+    "cloud_0": (8, 533, 400, 689),
+    "cloud_1": (407, 537, 777, 699),
+    "cloud_2": (744, 546, 939, 617),
+    "cloud_3": (949, 543, 1249, 657),
+    "cloud_4": (840, 658, 1024, 736),
+    "cloud_5": (9, 694, 425, 844),
+    "cloud_6": (960, 713, 1219, 832),
+    "cloud_7": (414, 725, 591, 784),
+    "cloud_8": (604, 735, 912, 827),
+}
+# The ranges fill their rows edge to edge, so they are cropped, not detected.
+STRIPS = {
+    "parallax.jpg": {
+        "mountains_far": (2, 22, 1262, 181),
+        "mountains_mid": (2, 190, 1262, 356),
+        # Stops short of the bottom rows, which fade back to paper and show as
+        # a pale line along the grass.
+        "mountains_near": (2, 369, 1262, 520),
+    },
+    # One painted cave wall per depth band, shown behind dug-out tiles.
+    "cave_backgrounds.jpg": {
+        "cave_bg_0": (34, 30, 1166, 183),
+        "cave_bg_1": (34, 205, 1166, 357),
+        "cave_bg_2": (34, 379, 1166, 531),
+        "cave_bg_3": (34, 553, 1166, 704),
+        "cave_bg_4": (34, 726, 1166, 875),
+    },
+}
+
+SHEETS["pod.jpg"] = {
+    "pod_0": (15, 3, 312, 212),
+    "pod_1": (330, 3, 628, 212),
+    "pod_drill_0": (652, 3, 945, 212),
+    "pod_drill_1": (970, 3, 1262, 212),
+    "pod_thrust_0": (0, 214, 318, 420),
+    "pod_thrust_1": (318, 220, 634, 436),
+    "pod_thrust_2": (628, 220, 952, 432),
+    "fx_dust_0": (30, 690, 180, 818),
+    "fx_dust_1": (228, 685, 440, 820),
+    "fx_dust_2": (485, 705, 580, 805),
+    "fx_dust_3": (655, 690, 782, 818),
+    "fx_dust_4": (838, 665, 1018, 835),
+    "fx_dust_5": (1055, 642, 1245, 840),
+}
+# Every pod frame goes on one canvas with the hull in its top-right corner,
+# so flames out the back and underneath never shift the hull between frames.
+# name -> (x of the drill tip, y of the antenna top) on the sheet.
+POD_CANVAS = (326, 220)
+POD_HULL = (286, 200)
+POD_ANCHOR = {
+    "pod_0": (308, 8),
+    "pod_1": (622, 8),
+    "pod_drill_0": (940, 8),
+    "pod_drill_1": (1257, 8),
+    "pod_thrust_0": (316, 219),
+    "pod_thrust_1": (633, 224),
+    "pod_thrust_2": (950, 224),
+}
+
+RUINS = {
+    "ruins_norse.jpg": [
+        (12, 215, 234, 519),
+        (245, 358, 565, 519),
+        (574, 227, 905, 519),
+        (920, 223, 1177, 513),
+        (9, 548, 316, 880),
+        (325, 577, 633, 876),
+        (637, 548, 904, 880),
+        (915, 547, 1187, 877),
+    ],
+    "ruins_mayan.jpg": [
+        (29, 194, 281, 438),
+        (313, 241, 615, 427),
+        (649, 182, 906, 426),
+        (935, 231, 1177, 431),
+        (13, 461, 511, 871),
+        (395, 442, 889, 633),
+        (520, 646, 872, 876),
+        (889, 530, 1187, 857),
+    ],
+    # The two or three largest pieces of each civilization.
+    "ruins_civ_dark.png": [
+        (492, 15, 752, 219),
+        (341, 43, 475, 141),
+        (1119, 50, 1289, 223),
+        (1297, 15, 1518, 221),
+        (331, 284, 507, 450),
+        (509, 247, 761, 453),
+        (1111, 261, 1296, 455),
+        (1302, 236, 1523, 453),
+        (335, 502, 519, 664),
+        (530, 466, 758, 665),
+        (1120, 503, 1295, 671),
+        (1302, 469, 1523, 668),
+        (333, 696, 503, 835),
+        (515, 679, 760, 839),
+        (1115, 701, 1292, 843),
+        (1307, 680, 1521, 841),
+        (341, 866, 503, 996),
+        (507, 843, 747, 1003),
+        (971, 846, 1117, 1004),
+        (1126, 857, 1295, 1002),
+        (1303, 846, 1524, 1004),
+    ],
+}
+_ruin = 0
+for _sheet, _boxes in RUINS.items():
+    SHEETS[_sheet] = {}
+    for _box in _boxes:
+        SHEETS[_sheet][f"ruin_{_ruin}"] = _box
+        _ruin += 1
+# Small carvings that mark a ruin's treasure.
+SHEETS["ruins_mayan.jpg"] |= {
+    "relic_idol_0": (28, 35, 135, 180),
+    "relic_idol_1": (623, 38, 725, 153),
+    "relic_idol_2": (1080, 48, 1173, 142),
+}
+SHEETS["ruins_norse.jpg"] |= {"relic_idol_3": (181, 64, 316, 179)}
+
 # Largest side in pixels, so everything fits one atlas no taller than 4096.
 BIG = {"mountains_far", "mountains_near", "cottage", "windmill", "mine_entrance"}
 MEDIUM = (
@@ -374,8 +514,12 @@ MEDIUM = (
 def max_side(name: str) -> int:
     # The sky draws the mountain ranges ~200 px tall across the whole screen;
     # shrinking them made the sky a 5x-stretched blur. Keep them at full size.
-    if name.startswith("mountains_"):
-        return 2048
+    # NOTE: 2040, not 2048: the atlas is 2048 wide and pads each sprite, and
+    # one that doesn't fit is silently left out of the game.
+    if name.startswith(("mountains_", "cave_bg_")):
+        return 2040
+    if name.startswith(("ruin_", "pod_")):
+        return 256
     if name in BIG:
         return 256
     if name.startswith("monster_"):
@@ -386,6 +530,11 @@ def max_side(name: str) -> int:
 
 
 def cut(rgba: np.ndarray, labels: np.ndarray, box: tuple) -> Image.Image:
+    return cut_at(rgba, labels, box)[0]
+
+
+def cut_at(rgba: np.ndarray, labels: np.ndarray, box: tuple) -> tuple[Image.Image, tuple]:
+    """The sprite in `box`, and where its top-left corner was on the sheet."""
     l, t, r, b = box
     inside = np.bincount(labels[t:b, l:r].ravel(), minlength=labels.max() + 1)
     total = np.bincount(labels.ravel(), minlength=labels.max() + 1)
@@ -398,7 +547,15 @@ def cut(rgba: np.ndarray, labels: np.ndarray, box: tuple) -> Image.Image:
     out = rgba[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1].copy()
     out[..., 3] = alpha[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1]
     out[out[..., 3] == 0] = 0
-    return Image.fromarray(out)
+    return Image.fromarray(out), (xs.min(), ys.min())
+
+
+def pod_frame(rgba: np.ndarray, labels: np.ndarray, name: str, box: tuple) -> Image.Image:
+    img, (left, top) = cut_at(rgba, labels, box)
+    tip, antenna = POD_ANCHOR[name]
+    canvas = Image.new("RGBA", POD_CANVAS)
+    canvas.paste(img, (int(left) - (tip - POD_CANVAS[0]), int(top) - antenna))
+    return canvas
 
 
 def shrink(img: Image.Image, side: int) -> Image.Image:
@@ -456,10 +613,12 @@ def animation(name: str) -> str | None:
     return None
 
 
-def main() -> None:
+def main(only: list[str]) -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     cuts: dict[str, Image.Image] = {}
     for sheet, regions in SHEETS.items():
+        if only and sheet not in only:
+            continue
         rgba = LOADERS[sheet](ART / sheet)
         labels, _ = detect(rgba, sheet)
         flooded = None
@@ -470,8 +629,17 @@ def main() -> None:
                     f = from_white_jpeg(ART / sheet, holes=False)
                     flooded = (f, detect(f, sheet)[0])
                 cuts[name] = cut(flooded[0], flooded[1], box)
+            elif name in POD_ANCHOR:
+                cuts[name] = pod_frame(rgba, labels, name, box)
             else:
                 cuts[name] = cut(rgba, labels, box)
+    for sheet, strips in STRIPS.items():
+        if only and sheet not in only:
+            continue
+        load = LOADERS.get(sheet, lambda path: np.array(Image.open(path).convert("RGBA")))
+        rgba = load(ART / sheet)
+        for name, (l, t, r, b) in strips.items():
+            cuts[name] = Image.fromarray(rgba[t:b, l:r])
     groups: dict[str, list[str]] = {}
     for name in cuts:
         groups.setdefault(animation(name) or name, []).append(name)
@@ -489,6 +657,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     if "--boxes" in sys.argv:
-        print_boxes()
+        print_boxes(sys.argv[sys.argv.index("--boxes") + 1 :])
     else:
-        main()
+        main(sys.argv[1:])

@@ -6,7 +6,7 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 use macroquad::prelude::*;
 use macroquad::rand::gen_range;
 
-use crate::art::Art;
+use crate::art::{Art, Sprite};
 use crate::critters;
 use crate::game::{
     BASE_KIT_PRICE, BOMB_POUCH, Event, FUSE, Game, Gun, Item, Loot, MAX_BASE_KITS, MAX_LEVEL,
@@ -886,6 +886,7 @@ impl Renderer {
         self.draw_shop(art);
         self.draw_sites(game, art, sh);
         self.draw_stashes(game, art);
+        self.draw_ruins(game, art, sw, sh);
         self.draw_crates(game, art, sw, sh);
         self.draw_critters(game, art);
         self.draw_bombs(game);
@@ -952,12 +953,11 @@ impl Renderer {
 
         self.draw_clouds(art, sw, ground, 0.04, 5.0, 0.9, 7, 11);
         // Far to near: each layer moves a little more with the camera than the
-        // last. Painted mountains when the art is there, drawn ridges otherwise.
-        // NOTE: the ranges stand just under the lowest dip of the green ridge
-        // (RIDGE * 0.23): any lower and the hill hides their foothills, any
-        // higher and sky shows under their flat bases.
-        let base = ground - RIDGE * 0.23 + 4.0;
-        if !self.draw_strip(art, "mountains_far", sw, base, 200.0, 0.08) {
+        // last. Painted ranges when the art is there, drawn ridges otherwise.
+        // NOTE: each range stands lower than the one behind it and hides that
+        // one's flat base; raise a near layer's base and sky shows under the
+        // range behind.
+        if !self.draw_strip(art, "mountains_far", sw, ground - 100.0, 230.0, 0.06) {
             self.draw_ridge(
                 art,
                 sw,
@@ -970,7 +970,7 @@ impl Renderer {
             );
         }
         self.draw_clouds(art, sw, ground, 0.12, 11.0, 0.6, 5, 12);
-        if !self.draw_strip(art, "mountains_near", sw, base, 150.0, 0.22) {
+        if !self.draw_strip(art, "mountains_mid", sw, ground - 36.0, 200.0, 0.14) {
             self.draw_ridge(
                 art,
                 sw,
@@ -982,16 +982,19 @@ impl Renderer {
                 false,
             );
         }
-        self.draw_ridge(
-            art,
-            sw,
-            ground,
-            0.45,
-            RIDGE,
-            Color::new(0.43, 0.66, 0.38, 1.0),
-            3,
-            true,
-        );
+        // The painted hills come with their own woods and run down to the grass.
+        if !self.draw_strip(art, "mountains_near", sw, ground + 2.0, 130.0, 0.3) {
+            self.draw_ridge(
+                art,
+                sw,
+                ground,
+                0.45,
+                RIDGE,
+                Color::new(0.43, 0.66, 0.38, 1.0),
+                3,
+                true,
+            );
+        }
         self.draw_birds(ground);
     }
 
@@ -1222,7 +1225,7 @@ impl Renderer {
                 let variant = world::hash(seed, tx, ty, 5) % 3;
                 let sprite = match tile {
                     Tile::Air => {
-                        art.rect(p.x, p.y, TILE, TILE, mix(base, BLACK, 0.72));
+                        self.draw_cave_wall(art, p, tx, ty, variant);
                         continue;
                     }
                     Tile::Wall => {
@@ -1263,6 +1266,110 @@ impl Renderer {
         // their own pass rather than breaking the tile batch at every mineral.
         for (p, m, h) in minerals {
             draw_mineral(p, m, h);
+        }
+    }
+
+    /// The back wall of a dug-out tile: its square of the depth band's cave
+    /// painting, so open space reads as a cave, not a flat hole.
+    fn draw_cave_wall(&self, art: &Art, p: Vec2, tx: i32, ty: i32, variant: u64) {
+        /// Rows of tiles one copy of a painting covers.
+        const ROWS: i32 = 6;
+        let band = world::band(ty);
+        let Some(s) = art.get(&format!("cave_bg_{band}")) else {
+            art.rect(p.x, p.y, TILE, TILE, mix(BAND_COLORS[band], BLACK, 0.72));
+            return;
+        };
+        let cols = (ROWS as f32 * s.size().x / s.size().y) as i32;
+        // NOTE: the paintings aren't made to repeat, so every other copy is
+        // mirrored, the same trick the mountain ranges use.
+        let across = tx.rem_euclid(2 * cols);
+        let (col, flip) = if across < cols {
+            (across, false)
+        } else {
+            (2 * cols - 1 - across, true)
+        };
+        let (w, h) = (s.src.w / cols as f32, s.src.h / ROWS as f32);
+        let src = Rect::new(
+            s.src.x + col as f32 * w,
+            s.src.y + ty.rem_euclid(ROWS) as f32 * h,
+            w,
+            h,
+        );
+        // Dimmed, so the wall sits behind the rock around it.
+        let dim = Color::new(0.62, 0.62, 0.66, 1.0);
+        Sprite { tex: s.tex, src }.draw_ex(p.x, p.y, TILE, TILE, dim, flip, 0.0);
+        // A dug-out surface tile keeps its turf along the top, so the grass
+        // line carries on across the pit instead of stopping dead at its edge.
+        if ty == 0
+            && let Some(g) = art.get(&format!("grass_{variant}"))
+        {
+            const TURF: f32 = 0.2;
+            let pad = TILE * 0.06;
+            let src = Rect::new(g.src.x, g.src.y, g.src.w, g.src.h * TURF);
+            let size = TILE + 2.0 * pad;
+            Sprite { tex: g.tex, src }.draw(p.x - pad, p.y - pad, size, size * TURF, WHITE);
+        }
+    }
+
+    /// Buried ruins, each standing on the floor of its chamber.
+    fn draw_ruins(&self, game: &Game, art: &Art, sw: f32, sh: f32) {
+        let count = (0..64)
+            .take_while(|i| art.get(&format!("ruin_{i}")).is_some())
+            .count();
+        if count == 0 {
+            return;
+        }
+        let mid = (self.view + vec2(sw, sh) / 2.0) / TILE;
+        let reach = sw.max(sh) / TILE / 2.0 + 1.0;
+        let (cols, rows) = world::RUIN_SIZE;
+        for (x, y, _) in game.ruins_near(mid.x, mid.y, reach) {
+            let pick = world::hash(game.world.seed, x, y, 64) as usize % count;
+            let Some(s) = art.get(&format!("ruin_{pick}")) else {
+                continue;
+            };
+            let (fit_w, fit_h) = ((cols as f32 - 0.3) * TILE, (rows as f32 - 0.2) * TILE);
+            let k = (fit_w / s.size().x).min(fit_h / s.size().y);
+            let (w, h) = (s.size().x * k, s.size().y * k);
+            let floor = self.screen(x as f32 + cols as f32 / 2.0, (y + rows) as f32);
+            s.draw(floor.x - w / 2.0, floor.y - h, w, h, WHITE);
+        }
+    }
+
+    /// The relic waiting in each unlooted ruin, glowing over the dark so the
+    /// chamber is worth digging toward.
+    fn draw_ruin_relics(&self, game: &Game, art: &Art, sw: f32, sh: f32) {
+        let mid = (self.view + vec2(sw, sh) / 2.0) / TILE;
+        let reach = sw.max(sh) / TILE / 2.0 + 1.0;
+        for (x, y, waiting) in game.ruins_near(mid.x, mid.y, reach) {
+            if !waiting {
+                continue;
+            }
+            let (rx, ry) = Game::ruin_relic_at(x, y);
+            let bob = (self.t * 2.5 + x as f32).sin() * 3.0;
+            let p = self.screen(rx, ry) + vec2(0.0, bob);
+            let r = TILE * (0.9 + 0.15 * (self.t * 3.0).sin());
+            draw_texture_ex(
+                &self.glow,
+                p.x - r,
+                p.y - r,
+                Color::new(1.0, 0.85, 0.35, 0.7),
+                DrawTextureParams {
+                    dest_size: Some(vec2(2.0 * r, 2.0 * r)),
+                    ..Default::default()
+                },
+            );
+            let idol = world::hash(game.world.seed, x, y, 65) % 4;
+            let Some(s) = art
+                .get(&format!("relic_idol_{idol}"))
+                .or_else(|| art.get("relic_coin"))
+            else {
+                draw_poly(p.x, p.y, 6, TILE * 0.3, self.t * 60.0, GOLD);
+                continue;
+            };
+            let size = TILE * 0.75;
+            let k = (size / s.size().x).min(size / s.size().y);
+            let (w, h) = (s.size().x * k, s.size().y * k);
+            s.draw(p.x - w / 2.0, p.y - h / 2.0, w, h, WHITE);
         }
     }
 
@@ -1472,13 +1579,16 @@ impl Renderer {
         } else {
             Vec2::ZERO
         };
-        let frame = if pod.dig.is_some() {
-            (self.t * 14.0) as i32 % 2
+        let name = if pod.dig.is_some() {
+            format!("pod_drill_{}", (self.t * 14.0) as i32 % 2)
+        } else if pod.thrusting {
+            format!("pod_thrust_{}", (self.t * 12.0) as i32 % 3)
+        } else if pod.vx.abs() > 0.5 {
+            format!("pod_{}", (self.t * 8.0) as i32 % 2)
         } else {
-            0
+            "pod_0".to_string()
         };
-        let w = TILE * 1.2;
-        let Some(tex) = art.get(&format!("pod_{frame}")) else {
+        let Some(tex) = art.get(&name).or_else(|| art.get("pod_0")) else {
             draw_rectangle(
                 p.x - TILE * 0.4,
                 p.y - TILE * 0.4,
@@ -1488,23 +1598,36 @@ impl Renderer {
             );
             return;
         };
-        let h = w * tex.size().y / tex.size().x;
+        // NOTE: every pod frame is one canvas with the hull in its top-right
+        // corner and room for flames behind and below (POD_CANVAS and POD_HULL
+        // in tools/slice_sheets.py). Sizing by the hull, not the canvas, keeps
+        // the pod the same size whether or not it's trailing fire.
+        const CANVAS: Vec2 = vec2(326.0, 220.0);
+        const HULL: Vec2 = vec2(286.0, 200.0);
+        let hull = vec2(TILE * 1.2, TILE * 1.2 * HULL.y / HULL.x);
+        let size = hull * CANVAS / HULL;
         let rotation = if digging_down {
             FRAC_PI_2 * pod.facing
         } else {
             0.0
         };
-        // Sit the sprite on the hitbox floor when level; center it when drilling down.
-        let y = if digging_down {
-            p.y - h / 2.0
+        // Sit the hull on the hitbox floor when level; center it when drilling down.
+        let hull_center = if digging_down {
+            p
         } else {
-            p.y + POD_HALF * TILE - h
+            vec2(p.x, p.y + POD_HALF * TILE - hull.y / 2.0)
         };
+        // The sprite turns about the canvas's middle, which is not the hull's.
+        let off = vec2(
+            (size.x - hull.x) / 2.0 * pod.facing,
+            -(size.y - hull.y) / 2.0,
+        );
+        let center = hull_center - Vec2::from_angle(rotation).rotate(off) + jitter;
         tex.draw_ex(
-            p.x - w / 2.0 + jitter.x,
-            y + jitter.y,
-            w,
-            h,
+            center.x - size.x / 2.0,
+            center.y - size.y / 2.0,
+            size.x,
+            size.y,
             WHITE,
             pod.facing < 0.0,
             rotation,
@@ -1669,6 +1792,7 @@ impl Renderer {
         self.draw_beams(game);
         self.draw_loose(game, art);
         self.draw_relic_drops(game, art);
+        self.draw_ruin_relics(game, art, sw, sh);
         self.draw_health_bars(game);
 
         // The fuse spark blinks faster as it burns down.

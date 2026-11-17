@@ -694,7 +694,7 @@ pub struct Game {
     pub stashes: Vec<Stash>,
     pub monsters: Vec<Monster>,
     pub critters: Vec<Critter>,
-    /// Cells whose den has emptied or whose crate has been opened.
+    /// Cells whose den has emptied, crate has been opened or ruin has been looted.
     spent: HashSet<(i32, i32)>,
     /// Whether the crate she's touching has already said it's staying shut.
     crate_refused: bool,
@@ -1256,19 +1256,21 @@ impl Game {
             true
         });
         for r in found {
-            self.levels.add_relic(r);
-            // The new headroom arrives full, like a bought upgrade.
-            match r {
-                Relic::ReserveTank => {
-                    self.pod.fuel = (self.pod.fuel + 15.0).min(self.levels.fuel_max())
-                }
-                Relic::Plating => {
-                    self.pod.hull = (self.pod.hull + 15.0).min(self.levels.hull_max())
-                }
-                _ => {}
-            }
-            self.events.push(Event::RelicFound(r));
+            self.claim_relic(r);
         }
+    }
+
+    fn claim_relic(&mut self, r: Relic) {
+        self.levels.add_relic(r);
+        // The new headroom arrives full, like a bought upgrade.
+        match r {
+            Relic::ReserveTank => {
+                self.pod.fuel = (self.pod.fuel + 15.0).min(self.levels.fuel_max())
+            }
+            Relic::Plating => self.pod.hull = (self.pod.hull + 15.0).min(self.levels.hull_max()),
+            _ => {}
+        }
+        self.events.push(Event::RelicFound(r));
     }
 
     fn update_guns(&mut self, dt: f32, input: Input) {
@@ -1809,16 +1811,14 @@ impl Game {
         }
     }
 
-    /// Dens and crates not yet used up, in the cells within `reach` tiles of (x, y).
+    /// Every den, crate and ruin in the cells within `reach` tiles of (x, y),
+    /// used up or not.
     fn pockets_near(&self, x: f32, y: f32, reach: f32) -> Vec<((i32, i32), Pocket)> {
         let (cx0, cy0) = world::cell_of((x - reach).floor() as i32, (y - reach).floor() as i32);
         let (cx1, cy1) = world::cell_of((x + reach).floor() as i32, (y + reach).floor() as i32);
         let mut out = Vec::new();
         for cy in cy0..=cy1 {
             for cx in cx0..=cx1 {
-                if self.spent.contains(&(cx, cy)) {
-                    continue;
-                }
                 if let Some(p) = world::pocket(self.world.seed, cx, cy) {
                     out.push(((cx, cy), p));
                 }
@@ -1831,11 +1831,29 @@ impl Game {
     pub fn crates_near(&self, x: f32, y: f32, reach: f32) -> Vec<(i32, i32)> {
         self.pockets_near(x, y, reach)
             .into_iter()
-            .filter_map(|(_, p)| match p {
-                Pocket::Crate { x, y } => Some((x, y)),
-                Pocket::Den { .. } => None,
+            .filter_map(|(cell, p)| match p {
+                Pocket::Crate { x, y } if !self.spent.contains(&cell) => Some((x, y)),
+                _ => None,
             })
             .collect()
+    }
+
+    /// The ruins in the cells within `reach` tiles of (x, y): each one's
+    /// top-left tile, and whether its relic is still there.
+    pub fn ruins_near(&self, x: f32, y: f32, reach: f32) -> Vec<(i32, i32, bool)> {
+        self.pockets_near(x, y, reach)
+            .into_iter()
+            .filter_map(|(cell, p)| match p {
+                Pocket::Ruin { x, y } => Some((x, y, !self.spent.contains(&cell))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Where the relic of the ruin at (x, y) rests: mid-chamber, on the floor.
+    pub fn ruin_relic_at(x: i32, y: i32) -> (f32, f32) {
+        let (w, h) = world::RUIN_SIZE;
+        (x as f32 + w as f32 / 2.0, (y + h) as f32 - 0.5)
     }
 
     /// Whether anything has broken through to the den whose top-left is (x, y).
@@ -1877,13 +1895,24 @@ impl Game {
         }
     }
 
-    /// Wakes any den that's been opened near the pod, and opens the crate
-    /// she's touching.
+    /// Wakes any den that's been opened near the pod, opens the crate she's
+    /// touching, and claims the relic of a ruin she's reached.
     fn update_pockets(&mut self) {
         let (px, py) = (self.pod.x, self.pod.y);
         let mut touching = None;
         for (cell, pocket) in self.pockets_near(px, py, DEN_REACH) {
+            if self.spent.contains(&cell) {
+                continue;
+            }
             match pocket {
+                Pocket::Ruin { x, y } => {
+                    let (rx, ry) = Game::ruin_relic_at(x, y);
+                    if (rx - px).hypot(ry - py) < 0.9 {
+                        self.spent.insert(cell);
+                        let h = world::hash(self.world.seed, x, y, 63);
+                        self.claim_relic(Relic::ALL[(h % Relic::ALL.len() as u64) as usize]);
+                    }
+                }
                 Pocket::Den { x, y } => {
                     if self.den_is_open(x, y) {
                         self.spent.insert(cell);
@@ -3423,6 +3452,39 @@ mod tests {
         assert!(
             !back.crates_near(x as f32, y as f32, 2.0).contains(&(x, y)),
             "opened crate came back after reload"
+        );
+    }
+
+    /// A ruin's relic is claimed once by reaching it, and stays claimed
+    /// through a save, or every reload would hand out another.
+    #[test]
+    fn a_ruin_gives_its_relic_once() {
+        let mut g = Game::new(11);
+        g.monster_timer = f32::INFINITY;
+        let (x, y) = (1..400)
+            .flat_map(|cy| (1..WIDTH / world::CELL).map(move |cx| (cx, cy)))
+            .find_map(|(cx, cy)| match world::pocket(11, cx, cy) {
+                Some(Pocket::Ruin { x, y }) => Some((x, y)),
+                _ => None,
+            })
+            .expect("no ruin in 400 rows of cells");
+        assert_eq!(g.ruins_near(x as f32, y as f32, 2.0), vec![(x, y, true)]);
+        let (rx, ry) = Game::ruin_relic_at(x, y);
+        park(&mut g, rx.floor() as i32, ry.floor() as i32);
+        let events = run(&mut g, 0.5, Input::default());
+        let found = events
+            .iter()
+            .filter(|e| matches!(e, Event::RelicFound(_)))
+            .count();
+        assert_eq!(found, 1, "relic claimed {found} times");
+        assert_eq!(g.levels.relics(), 1);
+        let back = Game::from_save(
+            serde_json::from_str(&serde_json::to_string(&g.to_save()).unwrap()).unwrap(),
+        );
+        assert_eq!(
+            back.ruins_near(x as f32, y as f32, 2.0),
+            vec![(x, y, false)],
+            "looted ruin refilled after reload"
         );
     }
 
