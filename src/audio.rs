@@ -193,6 +193,7 @@ impl Audio {
                 Event::CantBomb(_) => self.play("deny", 0.6),
                 Event::Towed => {}
                 Event::Landed { .. } => self.play("land", 0.6),
+                Event::BoulderLanded { .. } | Event::BoulderBroke { .. } => self.play("land", 0.9),
                 Event::Hurt { .. } => self.play("hit", 1.0),
                 Event::Died { .. } => self.play("death", 1.0),
                 Event::Respawned => self.play("respawn", 0.7),

@@ -197,6 +197,16 @@ pub struct Beam {
     pub t: f32,
 }
 
+/// A boulder on its way down, out of the tile grid until it lands.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rockfall {
+    /// The column it falls in.
+    pub x: i32,
+    /// Its top edge, in tiles.
+    pub y: f32,
+    pub vy: f32,
+}
+
 /// A rocket in flight.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rocket {
@@ -572,6 +582,16 @@ pub enum Event {
     Landed {
         speed: f32,
     },
+    /// A falling boulder came to rest in this tile.
+    BoulderLanded {
+        x: i32,
+        y: i32,
+    },
+    /// A falling boulder broke on the pod, in this tile.
+    BoulderBroke {
+        x: i32,
+        y: i32,
+    },
     Hurt {
         amount: f32,
     },
@@ -704,6 +724,10 @@ pub struct Game {
     pub live_bombs: Vec<Bomb>,
     pub arsenal: Arsenal,
     pub rockets: Vec<Rocket>,
+    pub falling: Vec<Rockfall>,
+    /// Seconds until the rock around the pod is next checked for boulders
+    /// with nothing holding them.
+    boulder_check: f32,
     pub drops: Vec<RelicDrop>,
     pub loose: Vec<Loose>,
     /// Refused this frame, announced together at the end of the update.
@@ -759,6 +783,8 @@ impl Game {
             live_bombs: Vec::new(),
             arsenal: Arsenal::default(),
             rockets: Vec::new(),
+            falling: Vec::new(),
+            boulder_check: 0.0,
             drops: Vec::new(),
             loose: Vec::new(),
             left_behind: Vec::new(),
@@ -1025,6 +1051,7 @@ impl Game {
         self.update_bombs(dt);
         self.update_guns(dt, input);
         self.update_drops(dt);
+        self.update_boulders(dt);
         self.update_monsters(dt);
         self.update_pockets();
         self.update_critters(dt);
@@ -1614,6 +1641,69 @@ impl Game {
         }
     }
 
+    /// Boulders with nothing on any of their four sides fall until they land
+    /// on something. NOTE: the mine is endless and generated on demand, so
+    /// there is no list of boulders to walk. Instead the rock around the pod
+    /// is checked a few times a second, wide enough that a boulder she has
+    /// just undermined, or one that was always hanging in a cave, lets go
+    /// before or as it comes into view.
+    fn update_boulders(&mut self, dt: f32) {
+        const EVERY: f32 = 0.2;
+        const REACH: (i32, i32) = (20, 14);
+        const CRUSH: f32 = 30.0;
+        self.boulder_check -= dt;
+        if self.boulder_check <= 0.0 {
+            self.boulder_check = EVERY;
+            let (px, py) = (self.pod.x.floor() as i32, self.pod.y.floor() as i32);
+            for y in (py - REACH.1).max(1)..=py + REACH.1 {
+                for x in px - REACH.0..=px + REACH.0 {
+                    let alone = self.world.get(x, y) == Tile::Boulder
+                        && [(1, 0), (-1, 0), (0, -1), (0, 1)]
+                            .iter()
+                            .all(|&(dx, dy)| self.world.get(x + dx, y + dy) == Tile::Air);
+                    if alone {
+                        self.world.set(x, y, Tile::Air);
+                        self.falling.push(Rockfall {
+                            x,
+                            y: y as f32,
+                            vy: 0.0,
+                        });
+                    }
+                }
+            }
+        }
+
+        let mut still = Vec::with_capacity(self.falling.len());
+        for mut b in std::mem::take(&mut self.falling) {
+            b.vy = (b.vy + GRAVITY * dt).min(MAX_FALL);
+            b.y += b.vy * dt;
+            let row = b.y.floor() as i32;
+            // NOTE: a boulder that reaches the pod breaks on it rather than
+            // landing. Left to settle, it would become a tile on top of or
+            // inside the pod and wall her in.
+            let on_pod = (b.x as f32 + 0.5 - self.pod.x).abs() < 0.5 + POD_HALF
+                && (b.y + 0.5 - self.pod.y).abs() < 0.5 + POD_HALF;
+            if on_pod {
+                self.events.push(Event::BoulderBroke { x: b.x, y: row });
+                if self.pod.invuln <= 0.0 {
+                    self.pod.invuln = 1.0;
+                    self.hurt(CRUSH, "Crushed by a boulder");
+                }
+                continue;
+            }
+            if self.world.get(b.x, row + 1).is_solid() {
+                self.world.set(b.x, row, Tile::Boulder);
+                self.events.push(Event::BoulderLanded { x: b.x, y: row });
+                continue;
+            }
+            still.push(b);
+        }
+        // A death above respawns the pod; anything that started falling
+        // since is kept either way.
+        still.append(&mut self.falling);
+        self.falling = still;
+    }
+
     fn hurt(&mut self, amount: f32, cause: &str) {
         self.pod.hull -= amount;
         self.events.push(Event::Hurt { amount });
@@ -2094,6 +2184,13 @@ impl Game {
         // Sorted so the same game always saves the same bytes.
         let mut spent: Vec<_> = self.spent.iter().copied().collect();
         spent.sort_unstable();
+        // NOTE: a boulder in mid-air is in no tile, so it goes back into the
+        // grid for the save, where it hangs with nothing round it and falls
+        // again on loading. Left out, saving at the wrong moment deletes it.
+        let mut world = self.world.clone();
+        for b in &self.falling {
+            world.set(b.x, b.y.floor() as i32, Tile::Boulder);
+        }
         SaveData {
             critters: self.critters.clone(),
             spent,
@@ -2112,7 +2209,7 @@ impl Game {
             loose: self.loose.clone(),
             base_kits: self.base_kits,
             stashes: self.stashes.clone(),
-            changes: self.world.changes(),
+            changes: world.changes(),
             deaths: self.deaths,
             max_depth: self.max_depth,
         }
@@ -2317,6 +2414,87 @@ mod tests {
         g.pod.x = 6.5;
         g.pod.y = depth as f32 + 1.0 - POD_HALF - EPS;
         g
+    }
+
+    /// An open shaft at column `x` from row `top` down to a dirt floor at
+    /// row `floor`, one column of air on each side, with a boulder hanging
+    /// in it at row `top + 1`.
+    fn hanging_boulder(g: &mut Game, x: i32, top: i32, floor: i32) {
+        for y in top..floor {
+            for dx in -1..=1 {
+                g.world.set(x + dx, y, Tile::Air);
+            }
+        }
+        g.world.set(x, floor, Tile::Dirt);
+        g.world.set(x, top + 1, Tile::Boulder);
+    }
+
+    /// A boulder with nothing above, below or beside it has nothing holding
+    /// it up: it drops, and comes to rest on the first thing under it.
+    #[test]
+    fn a_boulder_with_nothing_around_it_falls_until_it_lands() {
+        let mut g = game_at_depth(80);
+        hanging_boulder(&mut g, 12, 70, 79);
+        let events = run(&mut g, 3.0, Input::default());
+        assert_eq!(g.world.get(12, 71), Tile::Air, "still hanging");
+        assert_eq!(g.world.get(12, 78), Tile::Boulder, "not on the floor");
+        assert!(g.falling.is_empty(), "still in the air: {:?}", g.falling);
+        assert!(
+            events.contains(&Event::BoulderLanded { x: 12, y: 78 }),
+            "landed without a sound"
+        );
+    }
+
+    /// Anything touching a boulder, on any one side, holds it where it is.
+    #[test]
+    fn a_boulder_touching_anything_stays_put() {
+        for (dx, dy) in [(1, 0), (-1, 0), (0, -1), (0, 1)] {
+            let mut g = game_at_depth(80);
+            hanging_boulder(&mut g, 12, 70, 79);
+            g.world.set(12 + dx, 71 + dy, Tile::Dirt);
+            run(&mut g, 2.0, Input::default());
+            assert_eq!(
+                g.world.get(12, 71),
+                Tile::Boulder,
+                "fell with dirt at ({dx},{dy})"
+            );
+        }
+    }
+
+    /// A boulder coming down on the pod is a hit, not a new ceiling: it
+    /// hurts, and it breaks, so she is never walled into her own tile.
+    #[test]
+    fn a_falling_boulder_hurts_the_pod_and_shatters() {
+        let mut g = game_at_depth(80);
+        hanging_boulder(&mut g, 6, 72, 80);
+        g.world.set(6, 80, Tile::Air);
+        let full = g.pod.hull;
+        let events = run(&mut g, 3.0, Input::default());
+        assert!(g.pod.hull < full, "the boulder missed");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::BoulderBroke { x: 6, .. })),
+            "it didn't break"
+        );
+        assert!(g.falling.is_empty(), "still in the air: {:?}", g.falling);
+        for y in 72..=80 {
+            assert_ne!(g.world.get(6, y), Tile::Boulder, "came to rest at {y}");
+        }
+    }
+
+    /// A boulder caught in mid-air by a save is still a boulder afterwards.
+    #[test]
+    fn saving_mid_fall_keeps_the_boulder() {
+        let mut g = game_at_depth(80);
+        hanging_boulder(&mut g, 12, 70, 79);
+        run(&mut g, 0.5, Input::default());
+        assert_eq!(g.falling.len(), 1, "not falling yet");
+        let back = Game::from_save(g.to_save());
+        let boulders = (70..79)
+            .filter(|&y| back.world.get(12, y) == Tile::Boulder)
+            .count();
+        assert_eq!(boulders, 1, "the save lost or doubled it");
     }
 
     fn huge_monster_on(g: &mut Game) {

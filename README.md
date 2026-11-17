@@ -62,6 +62,7 @@ Losing the pod isn't the end: you start again at your nearest base, or the surfa
 - A radar mini-map with a sonar ping for ore, and an arrow to the nearest shop
 - Teleport home by sacrificing your cargo
 - Self-destruct to get out of any hole, at the cost of whatever you were carrying
+- Boulders with nothing left around them fall, and it hurts to be under one
 - Lost cargo waits where you fell, with an arrow pointing back to it
 - Nothing is ever destroyed: gems that don't fit in a full hold stay glinting where you dug them
 - The fuel bar turns red and flashes faster as you near the point of no return
