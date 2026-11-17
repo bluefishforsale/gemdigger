@@ -17,6 +17,7 @@ mod playtest;
 mod render;
 mod save;
 mod settings;
+mod shop;
 mod synth;
 mod world;
 
@@ -265,18 +266,6 @@ fn read_input() -> Input {
     }
 }
 
-fn shop_input(game: &mut Game) {
-    if !game.at_shop() {
-        return;
-    }
-    let click = is_mouse_button_pressed(MouseButton::Left).then(|| Vec2::from(mouse_position()));
-    for b in render::shop_buttons(game, screen_width()) {
-        if b.key.is_some_and(is_key_pressed) || click.is_some_and(|m| b.rect.contains(m)) {
-            game.apply(b.action);
-        }
-    }
-}
-
 async fn run(save_path: Option<PathBuf>, settings_path: Option<PathBuf>, mut settings: Settings) {
     prevent_quit();
     clear_background(BLACK);
@@ -353,7 +342,7 @@ async fn run(save_path: Option<PathBuf>, settings_path: Option<PathBuf>, mut set
         let events = if menu.open {
             Vec::new()
         } else {
-            shop_input(&mut game);
+            renderer.shop.input(&mut game);
             game.update(dt, read_input())
         };
 

@@ -38,6 +38,7 @@ Losing the pod isn't the end: you start again at your nearest base, or the surfa
 |---|---|
 | Arrows or WASD | Drive, dig, and fly (up or space) |
 | 1 to 0, or click | Buy and sell at a shop |
+| Tab | Next page of the shop: Service, Upgrades, Gear |
 | B | Drop a bomb |
 | F (hold) | Laser |
 | G | Rocket |

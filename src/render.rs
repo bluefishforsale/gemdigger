@@ -8,11 +8,9 @@ use macroquad::rand::gen_range;
 
 use crate::art::{Art, Sprite};
 use crate::critters;
-use crate::game::{
-    BASE_KIT_PRICE, BOMB_POUCH, Event, FUSE, Game, Gun, Item, Loot, MAX_BASE_KITS, POD_HALF,
-    SHOP_COLUMNS, ShopAction, SiteKind, Upgrade,
-};
+use crate::game::{BOMB_POUCH, Event, FUSE, Game, Item, Loot, POD_HALF, SHOP_COLUMNS, SiteKind};
 use crate::monsters::{Monster, Phase, Size};
+use crate::shop::{self, ShopMenu};
 use crate::world::Mineral;
 use crate::world::{self, Tile, WIDTH};
 
@@ -36,8 +34,8 @@ const BAND_COLORS: [Color; 5] = [
 ];
 /// Height of the green ridge in front of the mountains, before its waves.
 const RIDGE: f32 = 64.0;
-const GOLD: Color = Color::new(1.0, 0.82, 0.3, 1.0);
-const PANEL: Color = Color::new(0.06, 0.05, 0.09, 0.82);
+pub(crate) const GOLD: Color = Color::new(1.0, 0.82, 0.3, 1.0);
+pub(crate) const PANEL: Color = Color::new(0.06, 0.05, 0.09, 0.82);
 
 struct Particle {
     x: f32,
@@ -59,16 +57,6 @@ struct Toast {
     count: u32,
 }
 
-/// A clickable row in the shop panel.
-pub struct ShopButton {
-    pub rect: Rect,
-    pub action: ShopAction,
-    pub key: Option<KeyCode>,
-    label: String,
-    detail: String,
-    enabled: bool,
-}
-
 pub struct Renderer {
     particles: Vec<Particle>,
     toasts: Vec<Toast>,
@@ -81,6 +69,7 @@ pub struct Renderer {
     birds: Vec<Bird>,
     effects: Vec<Effect>,
     next_flock: f32,
+    pub shop: ShopMenu,
 }
 
 /// A one-shot sprite animation (an explosion, a smoke puff) in world space.
@@ -136,7 +125,7 @@ fn mix(a: Color, b: Color, k: f32) -> Color {
     )
 }
 
-fn money(n: u64) -> String {
+pub(crate) fn money(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, ch) in s.chars().enumerate() {
@@ -148,7 +137,7 @@ fn money(n: u64) -> String {
     format!("${out}")
 }
 
-fn text(s: &str, x: f32, y: f32, size: f32, color: Color) {
+pub(crate) fn text(s: &str, x: f32, y: f32, size: f32, color: Color) {
     // NOTE: whole pixels only. A label that follows something moving (the
     // edge arrows) otherwise lands between pixels and shimmers as it travels.
     let (x, y) = (x.round(), y.round());
@@ -156,7 +145,7 @@ fn text(s: &str, x: f32, y: f32, size: f32, color: Color) {
     draw_text(s, x, y, size, color);
 }
 
-fn text_centered(s: &str, cx: f32, y: f32, size: f32, color: Color) {
+pub(crate) fn text_centered(s: &str, cx: f32, y: f32, size: f32, color: Color) {
     let w = measure_text(s, None, size as u16, 1.0).width;
     text(s, cx - w / 2.0, y, size, color);
 }
@@ -359,6 +348,7 @@ impl Renderer {
             birds: Vec::new(),
             effects: Vec::new(),
             next_flock: 4.0,
+            shop: ShopMenu::default(),
         }
     }
 
@@ -486,11 +476,12 @@ impl Renderer {
         self.t += dt;
         self.flash = (self.flash - dt * 1.5).max(0.0);
         let mut target = vec2(game.pod.x, game.pod.y) * TILE;
-        // NOTE: the shop panel covers the right ~720 px, so while shopping the
-        // camera slides right to keep the pod and building in the open space
-        // to its left instead of hidden under the menu.
+        // NOTE: the shop panel covers the screen's right edge, so while
+        // shopping the camera slides right by half the panel's width to keep
+        // the pod and building centred in the open space to its left instead
+        // of hidden under the menu.
         if game.at_shop() {
-            target.x += 360.0;
+            target.x += shop::WIDTH / 2.0;
         }
         self.cam += (target - self.cam) * (1.0 - (-dt * 8.0).exp());
 
@@ -955,7 +946,7 @@ impl Renderer {
         }
         self.draw_hud(game, art, sw, sh);
         if game.at_shop() {
-            draw_shop_panel(game, sw);
+            self.shop.draw(game, sw);
         }
         self.draw_toasts(sw, sh, game.at_shop());
     }
@@ -2548,192 +2539,6 @@ impl Renderer {
             };
             text_centered(&line, cx, y, 28.0, with_alpha(WHITE, a));
         }
-    }
-}
-
-/// The shop's rows, laid out for the current screen; shared by drawing and input.
-pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
-    // Two columns, services on the left, upgrades and weapons on the right,
-    // so the panel fits a 720-pixel-tall window. Number keys cover the first ten.
-    let (w, h, gap) = (340.0, 44.0, 6.0);
-    let right = sw - w - 16.0;
-    let left = right - w - 12.0;
-    let keys = [
-        KeyCode::Key1,
-        KeyCode::Key2,
-        KeyCode::Key3,
-        KeyCode::Key4,
-        KeyCode::Key5,
-        KeyCode::Key6,
-        KeyCode::Key7,
-        KeyCode::Key8,
-        KeyCode::Key9,
-        KeyCode::Key0,
-    ];
-    let mut rows: Vec<ShopButton> = Vec::new();
-    let mut ys = [64.0f32, 64.0f32];
-    let mut push = |col: usize, action, label: String, detail: String, enabled: bool| {
-        let x = if col == 0 { left } else { right };
-        rows.push(ShopButton {
-            rect: Rect::new(x, ys[col], w, h),
-            action,
-            key: None,
-            label,
-            detail,
-            enabled,
-        });
-        ys[col] += h + gap;
-    };
-    let value = game.cargo_value();
-    push(
-        0,
-        ShopAction::Sell,
-        "Sell gems and meat".into(),
-        format!("+{}", money(value)),
-        value > 0,
-    );
-    let minerals = game.mineral_value();
-    push(
-        0,
-        ShopAction::SellMinerals,
-        "Sell spare minerals".into(),
-        format!("+{}", money(minerals)),
-        minerals > 0,
-    );
-    let fuel = game.refuel_cost();
-    push(
-        0,
-        ShopAction::Refuel,
-        "Refuel".into(),
-        money(fuel),
-        fuel > 0 && game.money > 0,
-    );
-    let repair = game.repair_cost();
-    push(
-        0,
-        ShopAction::Repair,
-        "Repair hull".into(),
-        money(repair),
-        repair > 0 && game.money > 0,
-    );
-    push(
-        0,
-        ShopAction::BuyBaseKit,
-        format!("Base kit  ({}/{MAX_BASE_KITS})", game.base_kits),
-        money(BASE_KIT_PRICE),
-        game.base_kits < MAX_BASE_KITS && game.money >= BASE_KIT_PRICE,
-    );
-    for u in Upgrade::ALL {
-        let level = game.levels.get(u);
-        let label = format!("{}  Lv {level}/{}", u.name(), u.max_level());
-        if level >= u.max_level() {
-            push(1, ShopAction::Buy(u), label, "MAX".into(), false);
-        } else {
-            let cost = u.cost(level);
-            push(
-                1,
-                ShopAction::Buy(u),
-                label,
-                money(cost),
-                game.money >= cost,
-            );
-        }
-    }
-    for g in Gun::ALL {
-        if game.arsenal.has(g) {
-            push(
-                1,
-                ShopAction::BuyGun(g),
-                g.name().into(),
-                "OWNED".into(),
-                false,
-            );
-        } else {
-            push(
-                1,
-                ShopAction::BuyGun(g),
-                g.name().into(),
-                money(g.price()),
-                game.money >= g.price(),
-            );
-        }
-    }
-    // Keys follow the old single-column order: services, then upgrades.
-    let keyed = rows
-        .iter()
-        .enumerate()
-        .filter(|(_, b)| !matches!(b.action, ShopAction::BuyGun(_) | ShopAction::BuyBaseKit))
-        .map(|(i, _)| i)
-        .take(keys.len())
-        .collect::<Vec<_>>();
-    for (k, i) in keyed.into_iter().enumerate() {
-        rows[i].key = Some(keys[k]);
-    }
-    rows
-}
-
-fn key_digit(k: KeyCode) -> char {
-    match k {
-        KeyCode::Key1 => '1',
-        KeyCode::Key2 => '2',
-        KeyCode::Key3 => '3',
-        KeyCode::Key4 => '4',
-        KeyCode::Key5 => '5',
-        KeyCode::Key6 => '6',
-        KeyCode::Key7 => '7',
-        KeyCode::Key8 => '8',
-        KeyCode::Key9 => '9',
-        _ => '0',
-    }
-}
-
-fn draw_shop_panel(game: &Game, sw: f32) {
-    let rows = shop_buttons(game, sw);
-    if rows.is_empty() {
-        return;
-    }
-    let x0 = rows.iter().map(|b| b.rect.x).fold(f32::MAX, f32::min);
-    let x1 = rows.iter().map(|b| b.rect.right()).fold(0.0, f32::max);
-    let y1 = rows.iter().map(|b| b.rect.bottom()).fold(0.0, f32::max);
-    draw_rectangle(x0 - 12.0, 14.0, x1 - x0 + 24.0, y1 + 12.0 - 14.0, PANEL);
-    let title = match game.current_site().map(|s| s.kind) {
-        Some(SiteKind::Outpost) => "OUTPOST  (click, or press 1-0)",
-        Some(SiteKind::Base) => "YOUR BASE  (click, or press 1-0)",
-        _ => "SHOP  (click, or press 1-0)",
-    };
-    text(title, x0, 46.0, 26.0, GOLD);
-    let mouse = Vec2::from(mouse_position());
-    for b in &rows {
-        let hover = b.rect.contains(mouse) && b.enabled;
-        let bg = match (b.enabled, hover) {
-            (true, true) => Color::new(0.35, 0.3, 0.15, 1.0),
-            (true, false) => Color::new(0.2, 0.18, 0.12, 1.0),
-            _ => Color::new(0.12, 0.12, 0.14, 1.0),
-        };
-        draw_rectangle(b.rect.x, b.rect.y, b.rect.w, b.rect.h, bg);
-        let fg = if b.enabled {
-            WHITE
-        } else {
-            Color::new(0.5, 0.5, 0.55, 1.0)
-        };
-        text(
-            &match b.key {
-                Some(k) => format!("{}  {}", key_digit(k), b.label),
-                None => format!("   {}", b.label),
-            },
-            b.rect.x + 12.0,
-            b.rect.y + 29.0,
-            24.0,
-            fg,
-        );
-        let dw = measure_text(&b.detail, None, 24, 1.0).width;
-        text(
-            &b.detail,
-            b.rect.x + b.rect.w - dw - 12.0,
-            b.rect.y + 29.0,
-            24.0,
-            if b.enabled { GOLD } else { fg },
-        );
     }
 }
 
