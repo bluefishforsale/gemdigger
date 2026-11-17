@@ -17,7 +17,6 @@ pub const SPAWN: (f32, f32) = (256.0, -POD_HALF);
 pub const SHOP_COLUMNS: (f32, f32) = (253.0, 259.0);
 /// Rows of ground under the shop that stay solid no matter what.
 const FOUNDATION_DEPTH: i32 = 2;
-pub const MAX_LEVEL: u8 = 5;
 pub const ORE_NAMES: [&str; 6] = ["Copper", "Silver", "Gold", "Emerald", "Ruby", "Starcrystal"];
 const ORE_VALUES: [u64; 6] = [10, 25, 60, 150, 400, 1000];
 const FUEL_PRICE: f32 = 1.0;
@@ -210,6 +209,7 @@ pub struct Rocket {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Upgrade {
     Drill,
+    Engine,
     Tank,
     Cargo,
     Hull,
@@ -217,8 +217,9 @@ pub enum Upgrade {
 }
 
 impl Upgrade {
-    pub const ALL: [Upgrade; 5] = [
+    pub const ALL: [Upgrade; 6] = [
         Upgrade::Drill,
+        Upgrade::Engine,
         Upgrade::Tank,
         Upgrade::Cargo,
         Upgrade::Hull,
@@ -228,6 +229,7 @@ impl Upgrade {
     pub fn name(self) -> &'static str {
         match self {
             Upgrade::Drill => "Drill",
+            Upgrade::Engine => "Engine",
             Upgrade::Tank => "Fuel tank",
             Upgrade::Cargo => "Cargo hold",
             Upgrade::Hull => "Hull",
@@ -235,9 +237,18 @@ impl Upgrade {
         }
     }
 
+    /// The highest level the shop sells.
+    pub fn max_level(self) -> u8 {
+        match self {
+            Upgrade::Drill => 99,
+            _ => 5,
+        }
+    }
+
     fn base_cost(self) -> f64 {
         match self {
             Upgrade::Drill => 120.0,
+            Upgrade::Engine => 150.0,
             Upgrade::Tank => 100.0,
             Upgrade::Cargo => 100.0,
             Upgrade::Hull => 120.0,
@@ -245,22 +256,25 @@ impl Upgrade {
         }
     }
 
-    /// Price to go from `level` to `level + 1`.
-    /// Price to go from `level` to `level + 1`. NOTE: the last two levels are
-    /// four times the curve, so maxing out takes about eight deep trips, not
-    /// two; levels 1-3 are unchanged so the early game feels the same.
+    /// Price to go from `level` to `level + 1`. NOTE: levels 3 and 4 are
+    /// four times the curve, so reaching level 5 takes about eight deep
+    /// trips, not two; levels 1-3 are unchanged so the early game feels the
+    /// same. Past level 5 the price creeps up 5% a level: the drill's long
+    /// tail is a place to put money, not a wall.
     pub fn cost(self, level: u8) -> u64 {
         let steep = if level >= 3 { 4.0 } else { 1.0 };
-        (self.base_cost() * 2.4f64.powi(level as i32) * steep).round() as u64
+        let (curve, tail) = (level.min(4) as i32, level.saturating_sub(4) as i32);
+        (self.base_cost() * 2.4f64.powi(curve) * steep * 1.05f64.powi(tail)).round() as u64
     }
 }
 
-/// Upgrade levels, each 0 to `MAX_LEVEL`, plus relics found, which stack
-/// on top with no cap. Keeping relics here means every stat sees them.
+/// Upgrade levels, each 0 to its upgrade's max, plus relics found, which
+/// stack on top with no cap. Keeping relics here means every stat sees them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Levels {
     pub drill: u8,
+    pub engine: u8,
     pub tank: u8,
     pub cargo: u8,
     pub hull: u8,
@@ -372,6 +386,7 @@ impl Levels {
     pub fn get(&self, u: Upgrade) -> u8 {
         match u {
             Upgrade::Drill => self.drill,
+            Upgrade::Engine => self.engine,
             Upgrade::Tank => self.tank,
             Upgrade::Cargo => self.cargo,
             Upgrade::Hull => self.hull,
@@ -382,12 +397,23 @@ impl Levels {
     fn bump(&mut self, u: Upgrade) {
         let slot = match u {
             Upgrade::Drill => &mut self.drill,
+            Upgrade::Engine => &mut self.engine,
             Upgrade::Tank => &mut self.tank,
             Upgrade::Cargo => &mut self.cargo,
             Upgrade::Hull => &mut self.hull,
             Upgrade::Lamp => &mut self.lamp,
         };
-        *slot = (*slot + 1).min(MAX_LEVEL);
+        *slot = (*slot + 1).min(u.max_level());
+    }
+
+    /// How much faster than a bare pod she drives and climbs.
+    pub fn engine_speed(&self) -> f32 {
+        1.0 + 0.1 * self.engine as f32
+    }
+
+    /// Share of a bare pod's fuel that driving and thrust burn.
+    pub fn engine_burn(&self) -> f32 {
+        1.0 - 0.08 * self.engine as f32
     }
 
     pub fn fuel_max(&self) -> f32 {
@@ -424,8 +450,14 @@ impl Levels {
         8 + 6 * self.cargo as usize
     }
 
+    /// NOTE: +40% a level up to 5, which is 3x. Past that each level adds
+    /// 2.5% less than the one before, heading for 10x and reaching about 9.4x
+    /// at level 99. Carry the +40% on instead and level 99 digs at 40x, which
+    /// is no digging at all.
     pub fn drill_speed(&self) -> f32 {
-        (1.0 + 0.4 * self.drill as f32) * (1.0 + 0.2 * self.overdrive as f32)
+        let early = 1.0 + 0.4 * self.drill.min(5) as f32;
+        let late = 7.0 * (1.0 - 0.975f32.powi(self.drill.saturating_sub(5) as i32));
+        (early + late) * (1.0 + 0.2 * self.overdrive as f32)
     }
 
     /// Extra light radius, in tiles.
@@ -1085,7 +1117,7 @@ impl Game {
             }
             ShopAction::Buy(u) => {
                 let level = self.levels.get(u);
-                if level >= MAX_LEVEL {
+                if level >= u.max_level() {
                     return;
                 }
                 let cost = u.cost(level);
@@ -1517,16 +1549,19 @@ impl Game {
         if dir != 0.0 {
             self.pod.facing = dir;
         }
-        let accel = 30.0 * dt;
-        self.pod.vx += (dir * MOVE_SPEED - self.pod.vx).clamp(-accel, accel);
+        // A better engine is quicker in every direction it pushes, and gets
+        // up to speed in the same time, so the pod never feels heavier.
+        let (speed, thirst) = (self.levels.engine_speed(), self.levels.engine_burn());
+        let accel = 30.0 * speed * dt;
+        self.pod.vx += (dir * MOVE_SPEED * speed - self.pod.vx).clamp(-accel, accel);
         self.pod.thrusting = input.up && self.pod.fuel > 0.0;
         if self.pod.thrusting {
-            self.pod.vy -= THRUST * dt;
-            self.burn(1.0 * dt);
+            self.pod.vy -= THRUST * speed * dt;
+            self.burn(1.0 * thirst * dt);
         }
-        self.pod.vy = (self.pod.vy + GRAVITY * dt).clamp(-MAX_RISE, MAX_FALL);
+        self.pod.vy = (self.pod.vy + GRAVITY * dt).clamp(-MAX_RISE * speed, MAX_FALL);
         if dir != 0.0 && self.pod.grounded {
-            self.burn(0.3 * dt);
+            self.burn(0.3 * thirst * dt);
         }
 
         // Horizontal step, snapping flush against whatever blocks it.
@@ -1638,15 +1673,17 @@ impl Game {
     }
 
     /// Fuel it would take to reach the nearest shop from here, with a little
-    /// margin: thrust burns 1 a second at 7 rows a second, driving 0.3 a
-    /// second at 5 columns a second.
+    /// margin: on a bare engine thrust burns 1 a second at 7 rows a second,
+    /// driving 0.3 a second at 5 columns a second. A better engine gets there
+    /// sooner and burns less each second.
     pub fn return_fuel(&self) -> f32 {
         let site = self.nearest_site(self.pod.x, self.pod.y);
         let (sx, sy) = site.landing();
-        let climb = (self.pod.y - sy).max(0.0) / MAX_RISE;
+        let engine = self.levels.engine_burn() / self.levels.engine_speed();
+        let climb = (self.pod.y - sy).max(0.0) / MAX_RISE * engine;
         // A shop below has to be dug down to: about a quarter unit a row.
         let dig = (sy - self.pod.y).max(0.0) * 0.25;
-        let drive = (sx - self.pod.x).abs() / MOVE_SPEED * 0.3;
+        let drive = (sx - self.pod.x).abs() / MOVE_SPEED * 0.3 * engine;
         (climb + dig + drive) * 1.2 + 1.0
     }
 
@@ -2365,7 +2402,7 @@ mod tests {
     #[test]
     fn huge_monster_kills_even_a_maxed_hull() {
         let mut g = game_at_depth(600);
-        g.levels.hull = MAX_LEVEL;
+        g.levels.hull = Upgrade::Hull.max_level();
         g.pod.hull = g.levels.hull_max();
         g.cargo = gems(&[5]);
         huge_monster_on(&mut g);
@@ -2500,11 +2537,12 @@ mod tests {
     fn buying_upgrades_charges_and_caps() {
         let mut g = Game::new(1);
         g.money = 1_000_000;
-        for _ in 0..MAX_LEVEL + 2 {
+        let max = Upgrade::Cargo.max_level();
+        for _ in 0..max + 2 {
             g.apply(ShopAction::Buy(Upgrade::Cargo));
         }
-        assert_eq!(g.levels.cargo, MAX_LEVEL);
-        let spent: u64 = (0..MAX_LEVEL).map(|l| Upgrade::Cargo.cost(l)).sum();
+        assert_eq!(g.levels.cargo, max);
+        let spent: u64 = (0..max).map(|l| Upgrade::Cargo.cost(l)).sum();
         assert_eq!(g.money, 1_000_000 - spent);
     }
 
@@ -2957,7 +2995,7 @@ mod tests {
     #[test]
     fn relics_stack_past_the_shop_max() {
         let mut g = armed(300);
-        g.levels.tank = MAX_LEVEL;
+        g.levels.tank = Upgrade::Tank.max_level();
         let before = g.levels.fuel_max();
         g.drops.push(RelicDrop {
             x: g.pod.x,
@@ -3275,11 +3313,96 @@ mod tests {
     fn top_upgrade_levels_are_steep() {
         let tree: u64 = Upgrade::ALL
             .iter()
-            .map(|&u| (0..MAX_LEVEL).map(|l| u.cost(l)).sum::<u64>())
+            .map(|&u| (0..5).map(|l| u.cost(l)).sum::<u64>())
             .sum();
-        assert_eq!(tree, 102_528);
+        assert_eq!(tree, 132_103);
         assert_eq!(Upgrade::Drill.cost(0), 120);
         assert_eq!(Upgrade::Drill.cost(2), 691);
+    }
+
+    /// The drill goes to 99. Up to level 5 it digs exactly as it always did.
+    /// Past that every level still helps, each a little less than the last,
+    /// so level 99 is about nine times a bare drill rather than the forty
+    /// the old +40% a level would give. Everything else still stops at 5.
+    #[test]
+    fn the_drill_goes_to_99_with_shrinking_gains() {
+        assert_eq!(Upgrade::Drill.max_level(), 99);
+        for u in Upgrade::ALL {
+            if u != Upgrade::Drill {
+                assert_eq!(u.max_level(), 5, "{u:?}");
+            }
+        }
+        let speed = |drill| {
+            Levels {
+                drill,
+                ..Levels::default()
+            }
+            .drill_speed()
+        };
+        for l in 0..=5u8 {
+            let was = 1.0 + 0.4 * l as f32;
+            assert!(
+                (speed(l) - was).abs() < 1e-4,
+                "level {l} changed: {}",
+                speed(l)
+            );
+        }
+        for l in 5..98u8 {
+            let (gain, next) = (speed(l + 1) - speed(l), speed(l + 2) - speed(l + 1));
+            assert!(
+                next > 0.0 && next < gain,
+                "level {l}: gains {gain} then {next}"
+            );
+        }
+        assert!(speed(99) < 10.0, "level 99 digs at {}x", speed(99));
+        for l in 0..98u8 {
+            assert!(
+                Upgrade::Drill.cost(l + 1) > Upgrade::Drill.cost(l),
+                "level {l} costs more than the next"
+            );
+        }
+        let mut g = Game::new(1);
+        g.money = u64::MAX / 2;
+        for _ in 0..120 {
+            g.apply(ShopAction::Buy(Upgrade::Drill));
+        }
+        assert_eq!(g.levels.drill, 99);
+    }
+
+    /// A better engine covers more ground, climbs faster and burns less
+    /// doing it.
+    #[test]
+    fn engine_upgrades_go_faster_on_less_fuel() {
+        let trip = |engine, input: Input| {
+            let mut g = Game::new(1);
+            g.pod.x = SHOP_COLUMNS.0 - 60.0;
+            g.levels.engine = engine;
+            let (x, y, fuel) = (g.pod.x, g.pod.y, g.pod.fuel);
+            run(&mut g, 0.6, input);
+            (x - g.pod.x, y - g.pod.y, fuel - g.pod.fuel)
+        };
+        let left = Input {
+            left: true,
+            ..Input::default()
+        };
+        let (far, _, burned) = trip(0, left);
+        let (farther, _, burned_less) = trip(5, left);
+        assert!(farther > far * 1.3, "drove {far} then {farther}");
+        assert!(
+            burned_less < burned * 0.7,
+            "burned {burned} then {burned_less}"
+        );
+        let up = Input {
+            up: true,
+            ..Input::default()
+        };
+        let (_, high, burned) = trip(0, up);
+        let (_, higher, burned_less) = trip(5, up);
+        assert!(higher > high * 1.3, "climbed {high} then {higher}");
+        assert!(
+            burned_less < burned * 0.7,
+            "burned {burned} then {burned_less}"
+        );
     }
 
     /// The way home costs more fuel the deeper she is.

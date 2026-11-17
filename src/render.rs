@@ -9,8 +9,8 @@ use macroquad::rand::gen_range;
 use crate::art::{Art, Sprite};
 use crate::critters;
 use crate::game::{
-    BASE_KIT_PRICE, BOMB_POUCH, Event, FUSE, Game, Gun, Item, Loot, MAX_BASE_KITS, MAX_LEVEL,
-    POD_HALF, SHOP_COLUMNS, ShopAction, SiteKind, Upgrade,
+    BASE_KIT_PRICE, BOMB_POUCH, Event, FUSE, Game, Gun, Item, Loot, MAX_BASE_KITS, POD_HALF,
+    SHOP_COLUMNS, ShopAction, SiteKind, Upgrade,
 };
 use crate::monsters::{Monster, Phase, Size};
 use crate::world::Mineral;
@@ -2625,8 +2625,8 @@ pub fn shop_buttons(game: &Game, sw: f32) -> Vec<ShopButton> {
     );
     for u in Upgrade::ALL {
         let level = game.levels.get(u);
-        let label = format!("{}  Lv {level}/{MAX_LEVEL}", u.name());
-        if level >= MAX_LEVEL {
+        let label = format!("{}  Lv {level}/{}", u.name(), u.max_level());
+        if level >= u.max_level() {
             push(1, ShopAction::Buy(u), label, "MAX".into(), false);
         } else {
             let cost = u.cost(level);
