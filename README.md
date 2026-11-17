@@ -38,6 +38,7 @@ Losing the pod isn't the end: you start again at your nearest base, or the surfa
 |---|---|
 | Arrows or WASD | Drive, dig, and fly (up or space) |
 | 1 to 0, or click | Buy and sell at a shop |
+| Tab | Next page of the shop: Service, Upgrades, Gear |
 | B | Drop a bomb |
 | F (hold) | Laser |
 | G | Rocket |
@@ -66,7 +67,7 @@ Losing the pod isn't the end: you start again at your nearest base, or the surfa
 - The fuel bar turns red and flashes faster as you near the point of no return
 - Run dry on the surface with no money and you're quietly towed back to the shop
 - Upgrades for drill, fuel tank, cargo hold, hull and lamp
-- Craft bombs from Coal, Sulfur and Potassium to blast through boulders and monsters
+- Dig up Coal, Sulfur and Potassium and they turn into a bomb in your hold, to blast through boulders and monsters
 - A painted sky with mountains, drifting clouds, trees and birds
 - Rare critter dens sealed in the rock: dig one open and they come out biting, and a shot critter drops meat to sell
 - Supply crates hidden in the rock, usually a bomb, once in a long while a gun or a full tank
