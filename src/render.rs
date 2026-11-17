@@ -659,6 +659,14 @@ impl Renderer {
                 let p = &game.pod;
                 self.burst(p.x, p.y, 16, Color::new(1.0, 0.3, 0.2, 1.0), 6.0, 6.0, true);
             }
+            Event::BoulderLanded { x, y } => {
+                let dust = tile_color(Tile::Dirt, y + 1);
+                self.burst(*x as f32 + 0.5, *y as f32 + 1.0, 14, dust, 3.0, 6.0, false);
+            }
+            Event::BoulderBroke { x, y } => {
+                let rock = tile_color(Tile::Boulder, *y);
+                self.burst(*x as f32 + 0.5, *y as f32 + 0.5, 24, rock, 5.0, 8.0, false);
+            }
             Event::Died {
                 y, cause, dropped, ..
             } => {
@@ -915,6 +923,7 @@ impl Renderer {
         self.draw_cave_layers(art, sw, sh);
         self.draw_surface_trees(game, art, sw);
         self.draw_tiles(game, art, sw, sh);
+        self.draw_falling(game, art);
         self.draw_shop(art);
         self.draw_turf(art, sw);
         self.draw_sites(game, art, sh);
@@ -1578,6 +1587,26 @@ impl Renderer {
             30.0,
             Color::new(0.35, 0.2, 0.1, 1.0),
         );
+    }
+
+    /// Boulders in mid-fall, drawn as the tile they were and will be again.
+    fn draw_falling(&self, game: &Game, art: &Art) {
+        for b in &game.falling {
+            let p = self.screen(b.x as f32, b.y);
+            match art.get("boulder") {
+                Some(s) => {
+                    let pad = TILE * 0.06;
+                    s.draw(
+                        p.x - pad,
+                        p.y - pad,
+                        TILE + 2.0 * pad,
+                        TILE + 2.0 * pad,
+                        WHITE,
+                    );
+                }
+                None => art.rect(p.x, p.y, TILE, TILE, tile_color(Tile::Boulder, 0)),
+            }
+        }
     }
 
     fn draw_rockets(&self, game: &Game) {
