@@ -300,6 +300,11 @@ struct Shuffled {
 /// exactly this much. Change one alone and the surface shows gaps or doubles.
 const SEAM: f32 = 0.06;
 
+/// Share of a cave painting's height that overlaps the row above it. NOTE:
+/// the same number as CAVE_SEAM in tools/slice_sheets.py, which fades each
+/// painting in from the top over exactly this much.
+const CAVE_SEAM: f32 = 0.2;
+
 /// Which of `count` variants the `i`th copy shows. Each run of `count` copies
 /// uses every variant once, in an order that changes from run to run, and
 /// always opens on variant 0, so no variant ever sits next to itself.
@@ -1382,11 +1387,16 @@ impl Renderer {
     /// at `pace` times the camera's speed.
     fn draw_cave_layer(&self, s: Sprite, sw: f32, top: f32, bottom: f32, pace: f32, tint: Color) {
         const HEIGHT: f32 = 6.0 * TILE;
+        // NOTE: rows overlap. Each painting fades in along its top edge and
+        // lies over the foot of the row above, so the light top of one row
+        // never butts against the dark foot of the last. Rows go on top to
+        // bottom, starting with the first one that reaches into the band.
+        const PITCH: f32 = HEIGHT * (1.0 - CAVE_SEAM);
         let width = HEIGHT * s.size().x / s.size().y;
         let scroll = self.view * pace;
-        let mut row = ((top + scroll.y) / HEIGHT).floor() as i64;
+        let mut row = ((top + scroll.y - HEIGHT) / PITCH).floor() as i64 + 1;
         loop {
-            let y = row as f32 * HEIGHT - scroll.y;
+            let y = row as f32 * PITCH - scroll.y;
             if y >= bottom {
                 break;
             }

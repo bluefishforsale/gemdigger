@@ -480,6 +480,11 @@ TOPSOIL = {
 # render.rs), so two different paintings cross-fade instead of meeting on a
 # line. Change one without the other and the surface shows gaps or doubles.
 SEAM = 0.06
+# Share of a cave painting's height, from the top, over which it fades in.
+# NOTE: the game stacks these in rows that overlap by exactly this much
+# (CAVE_SEAM in render.rs). Each is painted light at the top and dark at the
+# foot, and stacked square the change shows as a line across the cave.
+CAVE_SEAM = 0.2
 # Share of the soil wall's height, from the bottom, over which it fades out.
 # NOTE: the soil ends dark but not as dark as the root wall under it; cut
 # square, the join shows as a line across every pit.
@@ -752,7 +757,16 @@ def main(only: list[str]) -> None:
         load = LOADERS.get(sheet, lambda path: np.array(Image.open(path).convert("RGBA")))
         rgba = load(ART / sheet)
         for name, (l, t, r, b) in strips.items():
-            cuts[name] = Image.fromarray(rgba[t:b, l:r])
+            strip = rgba[t:b, l:r].copy()
+            if name.startswith(("cave_bg_", "cave_fg_")):
+                ramp = np.linspace(0, 1, round(strip.shape[0] * CAVE_SEAM))[:, None]
+                strip[: len(ramp), :, 3] = (strip[: len(ramp), :, 3] * ramp).round()
+                # A back wall stays solid at its foot so nothing shows through
+                # the overlap. A front layer has windows in it anyway, and its
+                # foot would stop on a line under the next row's clear top.
+                if name.startswith("cave_fg_"):
+                    strip[-len(ramp) :, :, 3] = (strip[-len(ramp) :, :, 3] * ramp[::-1]).round()
+            cuts[name] = Image.fromarray(strip)
     groups: dict[str, list[str]] = {}
     for name in cuts:
         groups.setdefault(animation(name) or name, []).append(name)
