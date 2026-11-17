@@ -286,9 +286,11 @@ fn draw_tree(x: f32, base: f32, s: f32, kind: u64, shade: f32) {
 /// How dark the deep is (0 = daylight) at a depth in tiles.
 fn darkness(depth: f32) -> f32 {
     let deep = ((depth - 10.0) / 350.0).clamp(0.0, 1.0).powf(0.8) * 0.96;
-    // NOTE: a hard edge at the shaft mouth: daylight stops the moment she's
-    // below the surface, so the shop above reads as the one lit room.
-    if depth < 0.6 { 0.0 } else { deep.max(0.3) }
+    // Daylight reaches four tiles down, then the dark closes in over the next
+    // six. NOTE: it has to arrive gradually. Switched on at the shaft mouth,
+    // the whole screen snapped dark the moment she dipped below the grass.
+    let k = ((depth - 4.0) / 6.0).clamp(0.0, 1.0);
+    deep.max(0.3 * k * k * (3.0 - 2.0 * k))
 }
 
 /// How far the pod can see, in tiles.

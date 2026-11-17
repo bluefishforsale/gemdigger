@@ -52,7 +52,7 @@ Losing the pod isn't the end: you start again at your nearest base, or the surfa
 
 - An endless mine that goes down forever, with rarer gems the deeper you dig
 - Five depth zones, from sunny topsoil to a dark abyss, each with its own music
-- Daylight stops at the mouth of the shaft, and the light shrinks as you descend
+- Daylight fades out a few meters into the shaft, and the light shrinks as you descend
 - Six kinds of monsters with health bars, from void spiders to the Shadow Leviathan and the Deep One
 - A laser, rockets and a charge-up ion cannon, bought at the shop
 - Rare relics dropped by monsters, permanent bonuses past the max upgrade
