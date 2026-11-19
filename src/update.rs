@@ -248,6 +248,10 @@ fn check_authenticode(staged: &Path, running: &Path) -> anyhow::Result<()> {
     let mut command = Command::new(powershell);
     command
         .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+        // NOTE: started from PowerShell 7, the game inherits its module path,
+        // and Windows PowerShell then can't load the module this command lives in.
+        // Without the variable it falls back to its own.
+        .env_remove("PSModulePath")
         .env("GEMDIGGER_STAGED", staged)
         .env("GEMDIGGER_RUNNING", running);
     finish(command)
