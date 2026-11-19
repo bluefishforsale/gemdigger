@@ -148,12 +148,14 @@ fn fetch(version: Version, file: &str) -> anyhow::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// `path` with `.tag` on the end: where a copy waits beside the real one.
+/// Where a copy waits beside the real one: `.new-gemdigger.exe` for `gemdigger.exe`.
+///
+/// NOTE: the tag goes in front so the extension survives. Windows picks how to
+/// read a file's signature from its extension and calls a `.new` file unsigned.
 fn beside(path: &Path, tag: &str) -> PathBuf {
-    let mut name = OsString::from(path.as_os_str());
-    name.push(".");
-    name.push(tag);
-    PathBuf::from(name)
+    let mut name = OsString::from(format!(".{tag}-"));
+    name.push(path.file_name().unwrap_or_default());
+    path.with_file_name(name)
 }
 
 fn remove(path: &Path) -> std::io::Result<()> {
@@ -168,7 +170,7 @@ fn remove(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Puts `staged` where `current` is, keeping `current` beside it as `.old`.
+/// Puts `staged` where `current` is, leaving `current` beside it as the old copy.
 ///
 /// NOTE: renames only, never a copy over the top. Windows lets a running exe
 /// be renamed but not overwritten, and a rename can't leave half a game behind.
@@ -189,9 +191,21 @@ fn swap(current: &Path, staged: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run(program: &str, args: &[&std::ffi::OsStr]) -> anyhow::Result<()> {
-    let out = Command::new(program)
-        .args(args)
+/// Keeps a helper program from flashing a console window over the game.
+#[cfg(windows)]
+fn windowless(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn windowless(_: &mut Command) {}
+
+fn finish(mut command: Command) -> anyhow::Result<()> {
+    windowless(&mut command);
+    let program = command.get_program().to_string_lossy().into_owned();
+    let out = command
         .output()
         .with_context(|| format!("unable to run {program}"))?;
     if !out.status.success() {
@@ -202,6 +216,37 @@ fn run(program: &str, args: &[&std::ffi::OsStr]) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+fn run(program: &str, args: &[&std::ffi::OsStr]) -> anyhow::Result<()> {
+    let mut command = Command::new(program);
+    command.args(args);
+    finish(command)
+}
+
+/// Refuses a Windows exe unless it carries a valid Authenticode signature
+/// from the same publisher as `running`.
+///
+/// NOTE: the checksum only proves the download matches the release page. This
+/// is what stops a tampered release from running. Comparing against the
+/// running copy keeps the publisher's name out of the source, and means an
+/// unsigned build can't update itself at all.
+fn check_authenticode(staged: &Path, running: &Path) -> anyhow::Result<()> {
+    // The paths travel as environment variables so nothing in them is ever
+    // read as PowerShell.
+    const SCRIPT: &str = "$ErrorActionPreference = 'Stop'; \
+        $new = Get-AuthenticodeSignature -LiteralPath $env:GEMDIGGER_STAGED; \
+        $old = Get-AuthenticodeSignature -LiteralPath $env:GEMDIGGER_RUNNING; \
+        if ($new.Status -ne 'Valid') { throw \"the download's signature is $($new.Status)\" }; \
+        if ($old.Status -ne 'Valid') { throw \"this copy's signature is $($old.Status)\" }; \
+        if ($new.SignerCertificate.Subject -ne $old.SignerCertificate.Subject) { \
+            throw \"the download is signed by $($new.SignerCertificate.Subject)\" }";
+    let mut command = Command::new("powershell");
+    command
+        .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+        .env("GEMDIGGER_STAGED", staged)
+        .env("GEMDIGGER_RUNNING", running);
+    finish(command)
 }
 
 /// Refuses an app that isn't ours and notarized, whatever its checksum says.
@@ -268,10 +313,12 @@ fn install(target: &Install, version: Version) -> anyhow::Result<()> {
     let staged = beside(target.path(), "new");
     remove(&staged).with_context(|| format!("unable to clear \"{}\"", staged.display()))?;
     let ready = match target {
-        Install::Exe(_) => fetch(version, EXE).and_then(|bytes| {
-            std::fs::write(&staged, bytes)
-                .with_context(|| format!("unable to write \"{}\"", staged.display()))
-        }),
+        Install::Exe(running) => fetch(version, EXE)
+            .and_then(|bytes| {
+                std::fs::write(&staged, bytes)
+                    .with_context(|| format!("unable to write \"{}\"", staged.display()))
+            })
+            .and_then(|()| check_authenticode(&staged, running)),
         Install::Bundle(_) => fetch(version, DMG)
             .and_then(|dmg| unpack_dmg(&dmg, &staged))
             .and_then(|()| check_signature(&staged)),
@@ -279,7 +326,10 @@ fn install(target: &Install, version: Version) -> anyhow::Result<()> {
     let swapped = ready.and_then(|()| swap(target.path(), &staged));
     if swapped.is_err() {
         let _ = remove(&staged);
+        return swapped;
     }
+    // Windows won't delete an exe that's still running; the next launch does.
+    let _ = remove(&beside(target.path(), "old"));
     swapped
 }
 
@@ -527,6 +577,31 @@ mod tests {
         assert_eq!(plist(&current), "new");
         assert_eq!(plist(&beside(&current, "old")), "old");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// An exe nobody signed must never replace the game, even with a matching checksum.
+    #[cfg(windows)]
+    #[test]
+    fn an_unsigned_exe_is_refused() {
+        let dir = scratch("unsigned");
+        let unsigned = dir.join("gemdigger.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &unsigned).unwrap();
+        let refused = check_authenticode(&beside(&unsigned, "new"), &unsigned);
+        assert!(refused.is_err(), "a missing download passed the check");
+        std::fs::copy(&unsigned, beside(&unsigned, "new")).unwrap();
+        let refused = check_authenticode(&beside(&unsigned, "new"), &unsigned).unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("NotSigned"),
+            "refused for the wrong reason: {refused:#}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The staged copy keeps its extension, which Windows reads the signature by.
+    #[test]
+    fn a_staged_copy_keeps_its_extension() {
+        let staged = beside(Path::new("games/gemdigger.exe"), "new");
+        assert_eq!(staged, Path::new("games/.new-gemdigger.exe"));
     }
 
     /// If the new copy can't be moved in, the game she had must still be there.
