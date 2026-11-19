@@ -209,6 +209,23 @@ pub fn draw_update(offered: Option<&str>, installing: Option<&str>) {
     }
     let (sw, sh) = (screen_width(), screen_height());
     draw_rectangle(0.0, 0.0, sw, sh, Color::new(0.0, 0.0, 0.03, 0.6));
+    // A solid card, or the words are lost against whatever the game shows behind.
+    let card = Rect::new(sw / 2.0 - 320.0, sh / 2.0 - 150.0, 640.0, 250.0);
+    draw_rectangle(
+        card.x,
+        card.y,
+        card.w,
+        card.h,
+        Color::new(0.06, 0.05, 0.09, 0.96),
+    );
+    draw_rectangle_lines(
+        card.x,
+        card.y,
+        card.w,
+        card.h,
+        3.0,
+        Color::new(1.0, 0.82, 0.3, 1.0),
+    );
     let centered = |s: &str, y: f32, size: u16, color: Color| {
         let w = measure_text(s, None, size, 1.0).width;
         draw_text(s, sw / 2.0 - w / 2.0, y, f32::from(size), color);
