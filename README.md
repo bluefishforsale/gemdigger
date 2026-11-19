@@ -75,6 +75,7 @@ Losing the pod isn't the end: you start again at your nearest base, or the surfa
 - Buried ruins from a dozen lost civilizations, each with a relic waiting inside
 - Painted cave walls behind every tunnel, a different one for each depth band
 - Saves automatically, so you always pick up where you left off
+- Tells you when a new version is out and, if you say yes, updates itself and restarts
 - An Esc menu with settings for music, sound effects, screen shake and full screen, plus New game to start over on a freshly rolled map
 
 ## Technologies

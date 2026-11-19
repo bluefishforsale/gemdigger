@@ -176,6 +176,107 @@ impl Menu {
     }
 }
 
+fn update_button(yes: bool) -> Rect {
+    let (w, h) = (240.0, 54.0);
+    let x = if yes {
+        screen_width() / 2.0 - w - 10.0
+    } else {
+        screen_width() / 2.0 + 10.0
+    };
+    Rect::new(x, screen_height() / 2.0 + 10.0, w, h)
+}
+
+/// Her answer to an offered update, if she gave one this frame: Enter or a
+/// click on Update for yes, Esc or a click on Later for no.
+pub fn update_answer() -> Option<bool> {
+    let mouse = Vec2::from(mouse_position());
+    let clicked = |yes: bool| {
+        is_mouse_button_pressed(MouseButton::Left) && update_button(yes).contains(mouse)
+    };
+    if is_key_pressed(KeyCode::Enter) || clicked(true) {
+        return Some(true);
+    }
+    if is_key_pressed(KeyCode::Escape) || clicked(false) {
+        return Some(false);
+    }
+    None
+}
+
+/// The panel over a paused game: the offer, or the download in progress.
+pub fn draw_update(offered: Option<&str>, installing: Option<&str>) {
+    if offered.is_none() && installing.is_none() {
+        return;
+    }
+    let (sw, sh) = (screen_width(), screen_height());
+    draw_rectangle(0.0, 0.0, sw, sh, Color::new(0.0, 0.0, 0.03, 0.6));
+    // A solid card, or the words are lost against whatever the game shows behind.
+    let card = Rect::new(sw / 2.0 - 320.0, sh / 2.0 - 150.0, 640.0, 250.0);
+    draw_rectangle(
+        card.x,
+        card.y,
+        card.w,
+        card.h,
+        Color::new(0.06, 0.05, 0.09, 0.96),
+    );
+    draw_rectangle_lines(
+        card.x,
+        card.y,
+        card.w,
+        card.h,
+        3.0,
+        Color::new(1.0, 0.82, 0.3, 1.0),
+    );
+    let centered = |s: &str, y: f32, size: u16, color: Color| {
+        let w = measure_text(s, None, size, 1.0).width;
+        draw_text(s, sw / 2.0 - w / 2.0, y, f32::from(size), color);
+    };
+    if let Some(version) = installing {
+        centered(
+            &format!("Getting GemDigger {version}..."),
+            sh / 2.0 - 20.0,
+            44,
+            WHITE,
+        );
+        centered(
+            "The game restarts when it's ready.",
+            sh / 2.0 + 30.0,
+            26,
+            Color::new(0.75, 0.75, 0.8, 1.0),
+        );
+        return;
+    }
+    let Some(version) = offered else {
+        return;
+    };
+    centered(
+        &format!("GemDigger {version} is out!"),
+        sh / 2.0 - 80.0,
+        48,
+        WHITE,
+    );
+    centered(
+        "Update now? Your mine is saved first.",
+        sh / 2.0 - 30.0,
+        26,
+        Color::new(0.75, 0.75, 0.8, 1.0),
+    );
+    let mouse = Vec2::from(mouse_position());
+    for (yes, label) in [(true, "Update (Enter)"), (false, "Later (Esc)")] {
+        let r = update_button(yes);
+        let bg = if yes {
+            Color::new(0.35, 0.3, 0.15, 0.95)
+        } else {
+            Color::new(0.1, 0.09, 0.14, 0.9)
+        };
+        draw_rectangle(r.x, r.y, r.w, r.h, bg);
+        if yes || r.contains(mouse) {
+            draw_rectangle_lines(r.x, r.y, r.w, r.h, 3.0, Color::new(1.0, 0.82, 0.3, 1.0));
+        }
+        let lw = measure_text(label, None, 28, 1.0).width;
+        draw_text(label, r.x + r.w / 2.0 - lw / 2.0, r.y + 36.0, 28.0, WHITE);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

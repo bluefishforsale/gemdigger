@@ -43,6 +43,18 @@ A y release changes gameplay, so before tagging:
 
 Bump `version` in `Cargo.toml` and merge, then push a `v*` tag. `release.yml` builds Windows and macOS, signs both, and publishes them with one `SHA256SUMS`. A tag fails before building if any signing input is missing, so nothing unsigned ships.
 
+## Self-update
+
+At startup an installed copy asks `api.github.com` for the latest release and offers to update when it is newer than `Cargo.toml`'s version (`src/update.rs`). Only the Windows exe and a binary inside a macOS `.app` are offered one; a `cargo run` build never checks. `gemdigger --update` does the same check and install with no window.
+
+The updater depends on the release, so these must not change without changing `src/update.rs` in a release that ships first:
+
+- the asset names `gemdigger.exe`, `gemdigger-macos.dmg` and `SHA256SUMS`, and `GemDigger.app` at the top of the DMG
+- tags of the form `vx.y.z`
+- the Apple team (`TEAM_ID` in `src/update.rs`) and the Windows publisher. A download signed by anyone else is refused, so installed copies would stop updating and players would have to download by hand.
+
+To test the macOS path without a release: set `version` in `Cargo.toml` below the latest release, `cargo build --release`, copy the binary to `<somewhere>/GemDigger.app/Contents/MacOS/gemdigger`, and run it with `--update`. It should report the update and `--version` should then print the latest release. Put `Cargo.toml` back afterwards.
+
 ## Signing
 
 The identities belong to Terrac Skiens and are shared with signal-agent; its `docs/signing-setup.md` covers how they were created. They live in this repo's `release` environment, which only `v*` tags can deploy to:

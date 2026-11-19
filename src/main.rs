@@ -19,6 +19,7 @@ mod save;
 mod settings;
 mod shop;
 mod synth;
+mod update;
 mod world;
 
 use std::path::{Path, PathBuf};
@@ -41,6 +42,14 @@ fn main() {
     {
         // A GUI-subsystem exe may have no stdout at all; never panic over it.
         let line = format!("{} {}\n", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        let _ = std::io::Write::write_all(&mut std::io::stdout(), line.as_bytes());
+        return;
+    }
+    if std::env::args().skip(1).any(|a| a == "--update") {
+        let line = match update::run_cli() {
+            Ok(done) => format!("{done}\n"),
+            Err(e) => format!("update failed: {e:#}\n"),
+        };
         let _ = std::io::Write::write_all(&mut std::io::stdout(), line.as_bytes());
         return;
     }
@@ -304,9 +313,40 @@ async fn run(save_path: Option<PathBuf>, settings_path: Option<PathBuf>, mut set
     let mut since_save = 0.0;
     let mut frames = 0u32;
     let mut cursor = Cursor::new();
+    let mut updater = update::Updater::start();
     loop {
-        cursor.update(menu.open);
-        let choice = menu.input(&settings);
+        match updater.poll() {
+            Some(update::Outcome::Installed) => {
+                store(save_path.as_ref(), &game, &mut renderer);
+                log::line("updated; restarting");
+                updater.restart();
+                break;
+            }
+            Some(update::Outcome::Failed) => renderer.toast(format!(
+                "Update didn't work. Get it at {}",
+                update::DOWNLOAD_PAGE
+            )),
+            None => {}
+        }
+        let offered = updater.offered().map(|v| v.to_string());
+        let installing = updater.installing().map(|v| v.to_string());
+        let updating = offered.is_some() || installing.is_some();
+        cursor.update(menu.open || updating);
+        // NOTE: the update panel takes Esc and Enter, so the menu must not
+        // read the same key press and open underneath it.
+        let choice = if updating {
+            if offered.is_some() {
+                match menu::update_answer() {
+                    Some(true) => updater.accept(),
+                    Some(false) => updater.decline(),
+                    None => {}
+                }
+            }
+            None
+        } else {
+            menu.input(&settings)
+        };
+        let paused = menu.open || updating;
         let fullscreen_key = is_key_pressed(KeyCode::F11);
         if choice == Some(Choice::Quit) {
             store(save_path.as_ref(), &game, &mut renderer);
@@ -334,12 +374,12 @@ async fn run(save_path: Option<PathBuf>, settings_path: Option<PathBuf>, mut set
 
         // Clamped so a stall (window drag, sleep) can't tunnel the pod through rock.
         // Zero while paused, so the world holds still behind the menu.
-        let dt = if menu.open {
+        let dt = if paused {
             0.0
         } else {
             get_frame_time().min(0.05)
         };
-        let events = if menu.open {
+        let events = if paused {
             Vec::new()
         } else {
             renderer.shop.input(&mut game);
@@ -372,6 +412,7 @@ async fn run(save_path: Option<PathBuf>, settings_path: Option<PathBuf>, mut set
         renderer.update(dt, &game, &events);
         renderer.draw(&game, &art, settings.shake);
         menu.draw(&settings);
+        menu::draw_update(offered.as_deref(), installing.as_deref());
 
         if is_quit_requested() {
             store(save_path.as_ref(), &game, &mut renderer);
