@@ -241,7 +241,11 @@ fn check_authenticode(staged: &Path, running: &Path) -> anyhow::Result<()> {
         if ($old.Status -ne 'Valid') { throw \"this copy's signature is $($old.Status)\" }; \
         if ($new.SignerCertificate.Subject -ne $old.SignerCertificate.Subject) { \
             throw \"the download is signed by $($new.SignerCertificate.Subject)\" }";
-    let mut command = Command::new("powershell");
+    // NOTE: the full path, never a bare name. A bare name is looked up in the
+    // game's own folder first, where a planted powershell.exe would vouch for anything.
+    let root = std::env::var_os("SystemRoot").ok_or_else(|| anyhow!("SystemRoot is not set"))?;
+    let powershell = PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    let mut command = Command::new(powershell);
     command
         .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
         .env("GEMDIGGER_STAGED", staged)
